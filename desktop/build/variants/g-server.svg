@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"><defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1c1c1f"/><stop offset="1" stop-color="#0c0c0d"/></linearGradient>
+<radialGradient id="glow" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#e04646" stop-opacity="0.26"/><stop offset="1" stop-color="#e04646" stop-opacity="0"/></radialGradient>
+</defs>
+<rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+<circle cx="256" cy="256" r="210" fill="url(#glow)"/>
+<rect x="19" y="19" width="474" height="474" rx="109" fill="none" stroke="#e04646" stroke-opacity="0.55" stroke-width="6"/>
+<g fill="none" stroke="#ff5252" stroke-linecap="round" stroke-linejoin="round"><rect x="118" y="104" width="276" height="130" rx="26" stroke-width="24"/><rect x="118" y="278" width="276" height="130" rx="26" stroke-width="24"/></g><circle cx="170" cy="169" r="17" fill="#ff5252"/><circle cx="170" cy="343" r="17" fill="#ff5252"/><g fill="none" stroke="#ff5252" stroke-linecap="round" stroke-linejoin="round"><path d="M222 169 H262 L282 136 L306 202 L326 169 H350" stroke-width="16"/><path d="M222 343 H350" stroke-width="16" stroke-opacity="0.45"/></g></svg>
