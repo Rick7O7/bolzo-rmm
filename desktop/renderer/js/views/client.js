@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import {
-  icon, esc, el, $, $$, meter, memPct, fmtBytes, fmtRate, fmtDuration, fmtTime, fmtAgo, osIcon, osLabel,
+  icon, esc, el, $, $$, tagHtml, meter, memPct, fmtBytes, fmtRate, fmtDuration, fmtTime, fmtAgo, osIcon, osLabel,
   statusHtml, toast, confirmDialog, promptDialog, enableTabIndent, throttle, exitBadge,
 } from '../ui.js';
 import { lineChart } from '../charts.js';
@@ -45,6 +45,7 @@ export function renderClient(root, { go, params }) {
       <div class="detail-title grow">
         <h1>${esc(a.name)} <button class="btn ghost sm icon-only" title="Umbenennen" data-rename>${icon('edit', 'sm')}</button></h1>
         <div class="meta">${statusHtml(a)}<span>${esc(a.os || osLabel(a.platform))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}</div>
+        ${a.tags?.length ? `<div class="tag-row" style="margin-top:6px">${a.tags.map((t) => tagHtml(t)).join('')}</div>` : ''}
       </div>
       <div class="btn-group">
         ${a.online ? `
@@ -199,7 +200,7 @@ export function renderClient(root, { go, params }) {
     function drawTags() {
       const a = agent();
       const box = $('[data-tags]', body);
-      box.innerHTML = `<div class="row" style="flex-wrap:wrap;gap:6px;margin-bottom:${a.tags.length ? 12 : 0}px">${a.tags.map((t) => `<span class="tag">${esc(t)}<button data-rm="${esc(t)}">${icon('x', 'sm')}</button></span>`).join('')}</div>
+      box.innerHTML = `<div class="tag-row" style="margin-bottom:${a.tags.length ? 12 : 0}px">${a.tags.map((t) => tagHtml(t, { removable: true })).join('')}</div>
         <input class="input" placeholder="Tag hinzufügen + Enter (z.B. Server, Büro)" data-newtag>`;
       const save = async (tags) => {
         try { await api.patch(`/api/agents/${id}`, { tags }); } catch (e) { toast(e.message, 'err'); }

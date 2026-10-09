@@ -1,5 +1,5 @@
 import { api, LS } from '../api.js';
-import { icon, esc, el, $, $$, meter, memPct, worstDisk, fmtDuration, osIcon, osLabel, statusHtml, primaryIp, throttle } from '../ui.js';
+import { icon, esc, el, $, $$, tagHtml, meter, memPct, worstDisk, fmtDuration, osIcon, osLabel, statusHtml, primaryIp, throttle } from '../ui.js';
 import { sparkline } from '../charts.js';
 import { addClientDialog } from './settings.js';
 
@@ -97,6 +97,7 @@ export function renderDashboard(root, { go }) {
         <div class="grow">
           <div class="cc-name">${esc(a.name)}</div>
           <div class="cc-sub"><span class="os">${osIcon(a.platform)}${esc(a.os || osLabel(a.platform))}</span></div>
+          ${a.tags?.length ? `<div class="tag-row" style="margin-top:8px">${a.tags.map((t) => tagHtml(t, { small: true })).join('')}</div>` : ''}
         </div>
         ${statusHtml(a).replace(/Online · \d+ Warnung(en)?/, 'Online')}
       </div>
@@ -108,7 +109,6 @@ export function renderDashboard(root, { go }) {
         <div class="row muted" style="font-size:12px;justify-content:space-between"><span>${esc(primaryIp(a))}</span><span>Uptime ${fmtDuration(m?.uptime)}</span></div>
       ` : `<div class="muted" style="font-size:12.5px">Zuletzt gesehen: ${new Date(a.lastSeen).toLocaleString('de-DE')}<br>${esc(primaryIp(a))}</div>`}
       ${alerts.length ? `<div class="cc-alerts">${alerts.map((x) => `<span class="badge ${x.level}">${icon('alert')}${esc(x.label)}</span>`).join('')}</div>` : ''}
-      ${a.tags?.length ? `<div class="row" style="gap:6px;flex-wrap:wrap">${a.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div>` : ''}
     </div>`;
   }
 

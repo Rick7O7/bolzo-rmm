@@ -242,3 +242,15 @@ export function exitBadge(r) {
     ? `<span class="badge good">${icon('check')}Exit 0${dur}</span>`
     : `<span class="badge critical">${icon('alert')}Exit ${r.exitCode}${dur}</span>`;
 }
+
+// ---------- Tags ----------
+// Jeder Tag-Name bekommt dauerhaft dieselbe Farbe (feste Reihenfolge, per Hash zugeordnet)
+const TAG_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#22a03a', '#9085e9', '#e66767'];
+export function tagColor(name) {
+  let h = 0;
+  for (const ch of String(name).toLowerCase()) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return TAG_COLORS[h % TAG_COLORS.length];
+}
+export function tagHtml(name, { removable = false, small = false } = {}) {
+  return `<span class="tag ${small ? 'sm' : ''}" style="--tag-c:${tagColor(name)}">${esc(name)}${removable ? `<button data-rm="${esc(name)}" title="Entfernen">${icon('x', 'sm')}</button>` : ''}</span>`;
+}
