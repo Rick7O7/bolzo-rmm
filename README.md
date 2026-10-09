@@ -47,24 +47,20 @@ Konfiguration: `/etc/bolzo-rmm/bolzo-rmm.env`, Daten: `/var/lib/bolzo-rmm`.
 
 ### HTTPS (wichtig, sobald es übers Internet geht)
 
-Der Server spricht selbst nur HTTP (Port 8095). Für Zugriffe von außen gehört ein Reverse-Proxy
-mit TLS davor (nginx, Caddy, Nginx Proxy Manager). WebSockets müssen durchgereicht werden:
+Der Server spricht selbst nur HTTP (Port 8095). Für Zugriffe von außen gehört nginx mit TLS davor.
+Fertige Konfiguration: [`deploy/nginx/bolzo-rmm.conf`](deploy/nginx/bolzo-rmm.conf) (WebSockets
+inklusive, SSL ergänzt certbot):
 
-```nginx
-location / {
-    proxy_pass http://<container-ip>:8095;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_read_timeout 3600s;
-}
+```bash
+curl -fsSL https://raw.githubusercontent.com/Rick7O7/bolzo-rmm/main/deploy/nginx/bolzo-rmm.conf -o /etc/nginx/sites-available/bolzo-rmm
+ln -s /etc/nginx/sites-available/bolzo-rmm /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+certbot --nginx -d rmm.bolzo.net
 ```
 
-Danach in `/etc/bolzo-rmm/bolzo-rmm.env` `PUBLIC_URL=https://rmm.deine-domain.de` setzen und
-`systemctl restart bolzo-rmm` ausführen. Alternativ nur über WireGuard/VPN erreichbar machen.
+Danach auf dem RMM-Server in `/etc/bolzo-rmm/bolzo-rmm.env` `PUBLIC_URL=https://rmm.bolzo.net`
+setzen und `systemctl restart bolzo-rmm` ausführen. Eine direkte Portfreigabe von 8095 im Router
+ist dann nicht mehr nötig und sollte geschlossen werden.
 
 ## 2. Desktop-App
 
