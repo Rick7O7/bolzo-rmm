@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
@@ -494,19 +495,41 @@ function installCommands(url, key) {
   };
 }
 
-// Ist PUBLIC_URL gesetzt und erreicht die App den Server anders (z.B. per LAN-IP),
-// gibt es zwei Befehlssätze: Clients im Heimnetz kommen oft nicht über die
-// öffentliche Adresse herein (kein Hairpin-NAT im Router).
+// Eigene Adresse im lokalen Netz (z.B. http://10.2.30.3:8095). Überschreibbar mit LAN_URL.
+function lanUrl() {
+  if (process.env.LAN_URL) return process.env.LAN_URL.replace(/\/+$/, '');
+  const isPrivate = (ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
+  const candidates = [];
+  for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
+    // Container-Bridges und VPN-Tunnel (WireGuard, Tailscale ...) sind nicht das Heimnetz
+    if (/^(docker|br-|veth|virbr|lo|wg|tun|tap|tailscale|zt|vEthernet)/i.test(name)) continue;
+    for (const a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal && isPrivate(a.address)) candidates.push(a);
+    }
+  }
+  // Echte Netzwerkkarten (mit MAC-Adresse) vor virtuellen Adaptern
+  candidates.sort((a, b) => (a.mac === '00:00:00:00:00:00') - (b.mac === '00:00:00:00:00:00'));
+  return candidates.length ? `http://${candidates[0].address}:${PORT}` : null;
+}
+
+// Clients im Heimnetz kommen oft nicht über die öffentliche Adresse herein (kein
+// Hairpin-NAT im Router). Deshalb gibt es neben der öffentlichen Adresse immer
+// auch die LAN-Adresse des Servers – und ggf. die Adresse, mit der die App verbunden ist.
 function enrollInfo(req) {
   const key = store.data.enrollKey;
-  const direct = requestUrl(req);
+  const host = (u) => u.replace(/^https?:\/\//, '');
+  const primary = PUBLIC_URL || requestUrl(req);
+  const candidates = [
+    [primary, PUBLIC_URL ? `Von außen (${host(primary)})` : `Wie die App verbunden ist (${host(primary)})`],
+    [lanUrl(), (u) => `Im Heimnetz (${host(u)})`],
+    [requestUrl(req), (u) => `Direkt (${host(u)})`],
+  ];
   const variants = [];
-  if (PUBLIC_URL && PUBLIC_URL !== direct) {
-    variants.push({ label: `Von außen (${PUBLIC_URL.replace(/^https?:\/\//, '')})`, ...installCommands(PUBLIC_URL, key) });
-    variants.push({ label: `Im Heimnetz / direkt (${direct.replace(/^https?:\/\//, '')})`, ...installCommands(direct, key) });
-  } else {
-    variants.push({ label: '', ...installCommands(PUBLIC_URL || direct, key) });
+  for (const [url, label] of candidates) {
+    if (!url || variants.some((v) => v.url === url)) continue;
+    variants.push({ label: typeof label === 'function' ? label(url) : label, ...installCommands(url, key) });
   }
+  if (variants.length === 1) variants[0].label = '';
   return { serverUrl: variants[0].url, key, linux: variants[0].linux, windows: variants[0].windows, variants };
 }
 
