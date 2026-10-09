@@ -4,3 +4,4 @@ server/.env
 desktop/dist/
 agent-test/
 *.log
+bolzo-rmm-server.tar.gz

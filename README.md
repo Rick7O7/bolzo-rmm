@@ -29,17 +29,21 @@ Ports geöffnet werden, und sie funktionieren auch hinter NAT.
 
 ## 1. Server installieren
 
-Empfohlen: ein eigener kleiner Debian/Ubuntu-LXC in Proxmox (512 MB RAM reichen, 1 GB ist komfortabel).
+Empfohlen: ein eigener kleiner Debian/Ubuntu-LXC in Proxmox (1 GB RAM, 8 GB Disk). Auf dem
+Container als root:
 
 ```bash
-# Ordner server/ auf den Container kopieren, z.B.:
-scp -r server root@<container-ip>:/root/bolzo-rmm-src
-ssh root@<container-ip> "bash /root/bolzo-rmm-src/install-server.sh"
+curl -fsSL https://raw.githubusercontent.com/Rick7O7/bolzo-rmm/main/install.sh | sudo bash
 ```
 
-Das Skript installiert eine eigene Node.js-Laufzeit nach `/opt/bolzo-rmm`, legt den Dienst
-`bolzo-rmm` an und **gibt das Admin-Passwort aus**. Konfiguration: `/etc/bolzo-rmm/bolzo-rmm.env`.
-Erneutes Ausführen aktualisiert den Server (Daten bleiben unter `/var/lib/bolzo-rmm`).
+Das Skript holt sich den Code von GitHub, installiert eine eigene Node.js-Laufzeit nach
+`/opt/bolzo-rmm`, legt den Dienst `bolzo-rmm` an und **gibt am Ende Adresse und Admin-Passwort aus**.
+Konfiguration: `/etc/bolzo-rmm/bolzo-rmm.env`, Daten: `/var/lib/bolzo-rmm`.
+
+- **Update:** denselben Befehl erneut ausführen (Clients, Daten und Passwort bleiben erhalten).
+- **Status:** `systemctl status bolzo-rmm` · **Logs:** `journalctl -u bolzo-rmm -f`
+- **Deinstallation:** `curl -fsSL https://raw.githubusercontent.com/Rick7O7/bolzo-rmm/main/uninstall.sh | sudo bash`
+  (Daten bleiben; komplett löschen mit `| sudo bash -s -- --purge`)
 
 ### HTTPS (wichtig, sobald es übers Internet geht)
 
