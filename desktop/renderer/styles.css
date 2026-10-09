@@ -50,9 +50,9 @@ a { color: var(--accent); }
 .shell { display: grid; grid-template-columns: var(--sidebar) 1fr; height: 100%; }
 .sidebar { display: flex; flex-direction: column; background: var(--bg); border-right: 1px solid var(--border); padding: 0 12px 12px; }
 .brand { height: var(--titlebar); display: flex; align-items: center; gap: 10px; padding: 0 6px; -webkit-app-region: drag; font-weight: 650; letter-spacing: 0.2px; }
-.brand-mark { width: 28px; height: 28px; display: block; filter: drop-shadow(0 4px 12px rgba(245, 165, 36, 0.25)); }
+.brand-mark { width: 28px; height: 28px; display: block; filter: drop-shadow(0 4px 12px rgba(255, 255, 255, 0.08)); }
 .wordmark { font-weight: 800; letter-spacing: 0.6px; }
-.wordmark span { font-weight: 500; color: #f5a524; letter-spacing: 0.4px; }
+.wordmark span { font-weight: 500; color: #a1a1a8; letter-spacing: 0.4px; }
 .nav { display: flex; flex-direction: column; gap: 2px; margin-top: 14px; }
 .nav-item { display: flex; align-items: center; gap: 11px; padding: 9px 10px; border-radius: var(--radius-sm); color: var(--text-2); cursor: pointer; border: 0; background: none; text-align: left; width: 100%; position: relative; }
 .nav-item:hover { background: var(--hover); color: var(--text); }
@@ -275,7 +275,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .result .output { border: 0; border-radius: 0; max-height: 300px; }
 
 /* ---------- Login ---------- */
-.login { height: 100%; display: grid; place-items: center; background: radial-gradient(1200px 600px at 70% -10%, rgba(245, 165, 36, 0.12), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgba(245, 165, 36, 0.06), transparent 60%), var(--bg); }
+.login { height: 100%; display: grid; place-items: center; background: radial-gradient(1200px 600px at 70% -10%, rgba(255, 255, 255, 0.06), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgba(57, 135, 229, 0.06), transparent 60%), var(--bg); }
 .login .drag { position: fixed; top: 0; left: 0; right: 0; height: var(--titlebar); -webkit-app-region: drag; }
 .login-card { width: 380px; padding: 32px; display: flex; flex-direction: column; gap: 16px; }
 .login-card .brand-mark { width: 56px; height: 56px; }

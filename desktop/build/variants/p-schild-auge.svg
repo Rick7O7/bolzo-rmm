@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"><defs>
+<linearGradient id="bg-p" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#18191d"/><stop offset="1" stop-color="#08080a"/></linearGradient>
+<radialGradient id="gl-p" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#2f80ff" stop-opacity="0.28"/><stop offset="1" stop-color="#2f80ff" stop-opacity="0"/></radialGradient><linearGradient id="ln-p" gradientUnits="userSpaceOnUse" x1="0" y1="80" x2="0" y2="430"><stop offset="0" stop-color="#8cc4ff"/><stop offset="1" stop-color="#2f80ff"/></linearGradient>
+<radialGradient id="ir-p" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#bfe0ff"/><stop offset="0.6" stop-color="#2f80ff"/><stop offset="1" stop-color="#0b3a8a"/></radialGradient>
+<clipPath id="cp-p"><path d="M150 262 A140 140 0 0 1 362 262 A140 140 0 0 1 150 262 Z"/></clipPath></defs>
+<rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg-p)"/><circle cx="256" cy="256" r="220" fill="url(#gl-p)"/>
+<rect x="19" y="19" width="474" height="474" rx="109" fill="none" stroke="#2f80ff" stroke-opacity="0.45" stroke-width="6"/><path d="M256 88 L392 138 V250 C392 338 334 396 256 428 C178 396 120 338 120 250 V138 Z" fill="#2f80ff" fill-opacity="0.08" stroke="url(#ln-p)" stroke-width="24" stroke-linejoin="round"/>
+<g clip-path="url(#cp-p)"><circle cx="256" cy="262" r="40" fill="url(#ir-p)"/><circle cx="256" cy="262" r="16" fill="#060a14"/><circle cx="268" cy="250" r="6" fill="#fff" fill-opacity="0.8"/></g>
+<path d="M150 262 A140 140 0 0 1 362 262 A140 140 0 0 1 150 262 Z" fill="none" stroke="url(#ln-p)" stroke-width="18" stroke-linejoin="miter"/></svg>
