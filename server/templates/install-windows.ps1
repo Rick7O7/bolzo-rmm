@@ -52,7 +52,13 @@ $ProgressPreference = 'SilentlyContinue'
   Invoke-WebRequest -UseBasicParsing "$Server/agent/agent.js" -OutFile (Join-Path $Dir 'agent.js')
 
   $cfgPath = Join-Path $Dir 'config.json'
-  if (-not (Test-Path $cfgPath) -or -not (Select-String -Path $cfgPath -Pattern '"secret"' -Quiet)) {
+  if ((Test-Path $cfgPath) -and (Select-String -Path $cfgPath -Pattern '"secret"' -Quiet)) {
+    # Neuinstallation: Kennung und Geheimnis behalten, aber die Server-Adresse aktualisieren
+    $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+    $cfg.server = $Server
+    $cfg | Select-Object * -ExcludeProperty revoked | ConvertTo-Json | Set-Content -Path $cfgPath -Encoding ASCII
+    Info "Bestehende Registrierung behalten, Server-Adresse: $Server"
+  } else {
     @{ server = $Server; enrollKey = $Key } | ConvertTo-Json | Set-Content -Path $cfgPath -Encoding ASCII
   }
   # Nur SYSTEM und Administratoren dürfen den Ordner (inkl. Geheimnis) lesen

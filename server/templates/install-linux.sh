@@ -50,6 +50,15 @@ if [ ! -f "$DIR/config.json" ] || ! grep -q '"secret"' "$DIR/config.json"; then
 }
 EOF
   chmod 600 "$DIR/config.json"
+else
+  # Neuinstallation: Kennung und Geheimnis behalten, aber die Server-Adresse aktualisieren
+  "$DIR/node/bin/node" -e '
+    const fs = require("fs"), [f, url] = process.argv.slice(1);
+    const c = JSON.parse(fs.readFileSync(f, "utf8"));
+    c.server = url; delete c.revoked;
+    fs.writeFileSync(f, JSON.stringify(c, null, 2));
+  ' "$DIR/config.json" "$SERVER"
+  info "Bestehende Registrierung behalten, Server-Adresse: $SERVER"
 fi
 
 cat > /etc/systemd/system/bolzo-rmm-agent.service <<EOF
