@@ -1,7 +1,7 @@
 {
   "name": "bolzo-rmm",
   "productName": "BOLZO RMM",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Desktop-App zur Fernwartung und Überwachung deiner Clients",
   "main": "main.js",
   "private": true,

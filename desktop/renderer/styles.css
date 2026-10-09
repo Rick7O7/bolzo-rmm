@@ -136,7 +136,7 @@ a { color: var(--accent); }
 .os svg { width: 14px; height: 14px; }
 
 .empty { text-align: center; color: var(--muted); padding: 48px 20px; }
-.empty .icon { width: 36px; height: 36px; stroke-width: 1.5; margin-bottom: 10px; color: #55555a; }
+.empty > .icon { width: 36px; height: 36px; stroke-width: 1.5; margin-bottom: 10px; color: #55555a; }
 .empty h3 { color: var(--text); margin: 0 0 6px; font-weight: 600; font-size: 15px; }
 .muted { color: var(--muted); }
 .mono { font-family: var(--mono); font-size: 12.5px; }
