@@ -98,6 +98,29 @@ Node.js-Laufzeit mit und läuft als systemd-Dienst `bolzo-rmm-agent` bzw. als ge
 `BolzoRMMAgent` (Konto SYSTEM). Logs: `journalctl -u bolzo-rmm-agent -f` bzw.
 `C:\Program Files\BolzoRMMAgent\agent.log`.
 
+## Updates
+
+Alles lässt sich aus der App heraus aktualisieren: **Einstellungen → Updates**. Steht etwas
+bereit, erscheint unten in der Seitenleiste „Update verfügbar".
+
+- **Dashboard-App:** prüft beim Start und alle 4 Stunden die GitHub-Releases, lädt neue
+  Versionen im Hintergrund und installiert sie per Klick („Jetzt installieren & neu starten").
+- **Server:** „Server aktualisieren" lädt den neuesten Stand von GitHub (`main`) und startet neu.
+  Technisch legt der Server nur eine Anforderungsdatei an; die systemd-Units
+  `bolzo-rmm-update.path/.service` führen dann als root `install.sh` aus. Log:
+  `/var/lib/bolzo-rmm/update.log`.
+- **Agents:** erkennen veralteten Code per Fingerabdruck und aktualisieren sich nach einem
+  Server-Update automatisch (abschaltbar), oder per Klick „Alle Agents aktualisieren".
+
+**Neue Version veröffentlichen (Entwicklung):**
+
+```bash
+git push                      # Server + Agent: danach in der App "Server aktualisieren"
+cd desktop
+npm version minor             # bzw. patch – Dashboard-Version erhöhen
+npm run release               # baut die Setup-EXE und legt das GitHub-Release an
+```
+
 ## Sicherheit
 
 - Wer das Admin-Passwort hat, hat **Root/SYSTEM-Zugriff auf alle Clients**. Starkes Passwort verwenden.

@@ -15,8 +15,7 @@ else
 fi
 
 print_banner() {
-  printf "%s
-" "${CYAN}${BOLD}"
+  printf "%s\n" "${CYAN}${BOLD}"
   cat <<'ASCII'
      ::::::::::::::::::::.           .:::::::::::::::       :::::                  ::::::::::::::::::::::::      ::::::::::::::::
     ::::::::::::::::::::::::      ::::::::::::::::::::::    :::::                  :::::::::::::::::::::::::  ::::::::::::::::::::::
@@ -34,20 +33,15 @@ print_banner() {
     ::::::::::::::::::::::::::    ::::::::::::::::::::::    ::::::::::::::::::::::::::::::::::::::::::::::::  ::::::::::::::::::::::
       :::::::::::::::::::::           ::::::::::::::          ::::::::::::::::::::::::::::::::::::::::::::::      ::::::::::::::
 ASCII
-  printf "%s
-" "${RESET}"
+  printf "%s\n" "${RESET}"
 }
 
-log_step() { STEP=$((STEP + 1)); printf "%s[%s/%s]%s %s
-" "${CYAN}${BOLD}" "${STEP}" "${TOTAL_STEPS}" "${RESET}" "$1"; }
-log_ok() { printf "%s[OK]%s %s
-" "${GREEN}${BOLD}" "${RESET}" "$1"; }
-log_warn() { printf "%s[WARN]%s %s
-" "${YELLOW}${BOLD}" "${RESET}" "$1"; }
+log_step() { STEP=$((STEP + 1)); printf "%s[%s/%s]%s %s\n" "${CYAN}${BOLD}" "${STEP}" "${TOTAL_STEPS}" "${RESET}" "$1"; }
+log_ok() { printf "%s[OK]%s %s\n" "${GREEN}${BOLD}" "${RESET}" "$1"; }
+log_warn() { printf "%s[WARN]%s %s\n" "${YELLOW}${BOLD}" "${RESET}" "$1"; }
 on_error() {
   local exit_code="$?"
-  printf "%s[FEHLER]%s Abgebrochen in Zeile %s (Exit-Code: %s).
-" "${RED}${BOLD}" "${RESET}" "$1" "${exit_code}" >&2
+  printf "%s[FEHLER]%s Abgebrochen in Zeile %s (Exit-Code: %s).\n" "${RED}${BOLD}" "${RESET}" "$1" "${exit_code}" >&2
   exit "${exit_code}"
 }
 trap 'on_error ${LINENO}' ERR
@@ -56,19 +50,14 @@ TOTAL_STEPS=3
 STEP=0
 
 print_banner
-printf "%sBOLZO RMM – Server Installer%s
-" "${BOLD}" "${RESET}"
-printf "Quelle: %s (Branch: %s)
-
-" "${REPO_URL}" "${BRANCH}"
+printf "%sBOLZO RMM – Server Installer%s\n" "${BOLD}" "${RESET}"
+printf "Quelle: %s (Branch: %s)\n\n" "${REPO_URL}" "${BRANCH}"
 
 if [[ "${EUID}" -ne 0 ]]; then
-  printf "%sBitte mit sudo/root ausfuehren.%s
-" "${RED}${BOLD}" "${RESET}"
+  printf "%sBitte mit sudo/root ausfuehren.%s\n" "${RED}${BOLD}" "${RESET}"
   exit 1
 fi
-command -v systemctl >/dev/null 2>&1 || { printf "%ssystemd wird benoetigt.%s
-" "${RED}${BOLD}" "${RESET}"; exit 1; }
+command -v systemctl >/dev/null 2>&1 || { printf "%ssystemd wird benoetigt.%s\n" "${RED}${BOLD}" "${RESET}"; exit 1; }
 
 log_step "Basis-Tools installieren (curl, git)"
 export DEBIAN_FRONTEND=noninteractive
@@ -82,15 +71,14 @@ git clone --quiet --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${SRC_DIR}"
 log_ok "Quellcode geladen ($(git -C "${SRC_DIR}" log -1 --format='%h %s'))"
 
 log_step "Server einrichten"
-bash "${SRC_DIR}/server/install-server.sh"
+BOLZO_RMM_COMMIT="$(git -C "${SRC_DIR}" rev-parse --short=7 HEAD)" \
+BOLZO_RMM_DATE="$(git -C "${SRC_DIR}" log -1 --format=%cI)" \
+BOLZO_RMM_MESSAGE="$(git -C "${SRC_DIR}" log -1 --format=%s)" \
+BOLZO_RMM_REPO="${REPO_URL}" BOLZO_RMM_BRANCH="${BRANCH}" \
+  bash "${SRC_DIR}/server/install-server.sh"
 rm -rf "${SRC_DIR}"
 
-printf "
-%sFertig.%s Melde dich jetzt in der BOLZO-RMM-App mit der oben angezeigten Adresse an.
-" "${GREEN}${BOLD}" "${RESET}"
-printf "Status:  systemctl status bolzo-rmm
-"
-printf "Config:  /etc/bolzo-rmm/bolzo-rmm.env
-"
-printf "Update:  denselben curl-Befehl erneut ausfuehren
-"
+printf "\n%sFertig.%s Melde dich jetzt in der BOLZO-RMM-App mit der oben angezeigten Adresse an.\n" "${GREEN}${BOLD}" "${RESET}"
+printf "Status:  systemctl status bolzo-rmm\n"
+printf "Config:  /etc/bolzo-rmm/bolzo-rmm.env\n"
+printf "Update:  denselben curl-Befehl erneut ausfuehren\n"

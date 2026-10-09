@@ -89,6 +89,7 @@ function summarize(a, withSpark = false) {
     tags: a.tags || [],
     notes: a.notes || '',
     version: a.version || '',
+    outdated: agentOutdated(a),
     publicIp: a.publicIp || '',
     createdAt: a.createdAt,
     lastSeen: online ? Date.now() : a.lastSeen,
@@ -396,9 +397,92 @@ app.put('/api/settings', requireAdmin, wrap(async (req, res) => {
     const v = Number(t[k]);
     if (v >= 10 && v <= 100) store.data.settings.thresholds[k] = v;
   }
+  if (typeof req.body?.autoUpdateAgents === 'boolean') store.data.settings.autoUpdateAgents = req.body.autoUpdateAgents;
   store.save();
   for (const id of Object.keys(store.data.agents)) broadcastAgent(id);
   res.json(store.data.settings);
+}));
+
+// ---- Updates ---------------------------------------------------------------
+// Server: Die Desktop-App legt eine Anforderungsdatei an. Eine systemd-Path-Unit
+// (läuft als root, siehe install-server.sh) startet daraufhin install.sh von GitHub.
+const REPO = process.env.UPDATE_REPO || 'Rick7O7/bolzo-rmm';
+const UPDATE_REQUEST = path.join(DATA_DIR, 'update-request');
+const UPDATE_LOG = path.join(DATA_DIR, 'update.log');
+const UPDATE_UNIT = '/etc/systemd/system/bolzo-rmm-update.path';
+let updateRequestedAt = 0;
+
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+const SERVER_VERSION = readJson(path.join(__dirname, 'version.json')) || { commit: 'dev', date: null, message: 'Entwicklungsversion' };
+
+// Mitgelieferter Agent: Version und Fingerabdruck (muss dem CODE_HASH im Agent entsprechen)
+let agentBundle = { version: '?', hash: '' };
+function loadAgentBundle() {
+  const buf = fs.readFileSync(path.join(__dirname, 'agent', 'agent.js'));
+  agentBundle = {
+    version: (buf.toString('utf8').match(/const VERSION = '([^']+)'/) || [])[1] || '?',
+    hash: crypto.createHash('sha256').update(buf).digest('hex'),
+  };
+}
+loadAgentBundle();
+const agentOutdated = (a) => !a.agentHash || a.agentHash !== agentBundle.hash;
+
+let latestCache = { at: 0, data: null };
+async function latestOnGitHub(force = false) {
+  if (!force && latestCache.data && Date.now() - latestCache.at < 5 * 60e3) return latestCache.data;
+  const res = await fetch(`https://api.github.com/repos/${REPO}/commits/main`, {
+    headers: { 'User-Agent': 'bolzo-rmm-server', Accept: 'application/vnd.github+json' },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`GitHub antwortet mit ${res.status}`);
+  const c = await res.json();
+  latestCache = { at: Date.now(), data: { commit: c.sha.slice(0, 7), date: c.commit.committer.date, message: c.commit.message.split('\n')[0] } };
+  return latestCache.data;
+}
+
+function updateLogTail() {
+  try { return fs.readFileSync(UPDATE_LOG, 'utf8').replace(/\x1b\[[0-9;]*m/g, '').split('\n').slice(-25).join('\n'); } catch { return ''; }
+}
+
+app.get('/api/update', requireAdmin, wrap(async (req, res) => {
+  let latest = null, latestError = null;
+  try { latest = await latestOnGitHub(req.query.force === '1'); } catch (e) { latestError = e.message; }
+  const agents = Object.values(store.data.agents);
+  res.json({
+    server: SERVER_VERSION,
+    latest,
+    latestError,
+    updateAvailable: !!latest && SERVER_VERSION.commit !== 'dev' && latest.commit !== SERVER_VERSION.commit,
+    canSelfUpdate: fs.existsSync(UPDATE_UNIT),
+    updating: fs.existsSync(UPDATE_REQUEST) || (updateRequestedAt > 0 && Date.now() - updateRequestedAt < 15 * 60e3),
+    log: updateLogTail(),
+    agent: { version: agentBundle.version, total: agents.length, outdated: agents.filter(agentOutdated).length, outdatedOnline: agents.filter((a) => conns.has(a.id) && agentOutdated(a)).length },
+  });
+}));
+
+app.post('/api/update/server', requireAdmin, wrap(async (req, res) => {
+  if (!fs.existsSync(UPDATE_UNIT)) throw httpError(501, 'Selbst-Update ist auf diesem Server noch nicht eingerichtet. Bitte einmal den curl-Installationsbefehl auf dem Server ausführen.');
+  fs.writeFileSync(UPDATE_REQUEST, JSON.stringify({ requestedAt: Date.now() }));
+  updateRequestedAt = Date.now();
+  log('[update] Server-Update angefordert');
+  broadcast({ type: 'server.updating' });
+  res.json({ ok: true });
+}));
+
+function updateAgent(id, reason) {
+  const a = store.data.agents[id];
+  if (!a) return Promise.resolve();
+  a.lastAutoUpdate = Date.now();
+  log(`[update] Agent ${a.info?.hostname || id} wird aktualisiert (${reason})`);
+  return agentRequest(id, 'update', {}, 60000);
+}
+
+app.post('/api/update/agents', requireAdmin, wrap(async (req, res) => {
+  const ids = [...conns.keys()].filter((id) => store.data.agents[id] && agentOutdated(store.data.agents[id]));
+  const results = await Promise.allSettled(ids.map((id) => updateAgent(id, 'manuell')));
+  res.json({ requested: ids.length, ok: results.filter((r) => r.status === 'fulfilled').length });
 }));
 
 function enrollInfo(req) {
@@ -523,9 +607,13 @@ wssAgent.on('connection', (ws, req) => {
       const old = conns.get(agentId);
       if (old) old.ws.close(4002, 'replaced');
       conns.set(agentId, { ws, pending: new Map() });
-      Object.assign(a, { info: msg.info, version: msg.version, publicIp: clientIp(req), lastSeen: Date.now() });
+      Object.assign(a, { info: msg.info, version: msg.version, agentHash: msg.hash || '', publicIp: clientIp(req), lastSeen: Date.now() });
       store.save();
       sendJson(ws, { type: 'welcome' });
+      if (store.data.settings.autoUpdateAgents && agentOutdated(a) && Date.now() - (a.lastAutoUpdate || 0) > 10 * 60e3) {
+        const id = agentId;
+        setTimeout(() => updateAgent(id, 'automatisch').catch((e) => log(`[update] Agent-Update fehlgeschlagen: ${e.message}`)), 3000);
+      }
       log(`[agent] online: ${a.info?.hostname} (${clientIp(req)})`);
       broadcastAgent(agentId);
       return;

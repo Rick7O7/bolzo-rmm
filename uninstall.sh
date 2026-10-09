@@ -15,8 +15,7 @@ else
 fi
 
 print_banner() {
-  printf "%s
-" "${CYAN}${BOLD}"
+  printf "%s\n" "${CYAN}${BOLD}"
   cat <<'ASCII'
      ::::::::::::::::::::.           .:::::::::::::::       :::::                  ::::::::::::::::::::::::      ::::::::::::::::
     ::::::::::::::::::::::::      ::::::::::::::::::::::    :::::                  :::::::::::::::::::::::::  ::::::::::::::::::::::
@@ -34,20 +33,15 @@ print_banner() {
     ::::::::::::::::::::::::::    ::::::::::::::::::::::    ::::::::::::::::::::::::::::::::::::::::::::::::  ::::::::::::::::::::::
       :::::::::::::::::::::           ::::::::::::::          ::::::::::::::::::::::::::::::::::::::::::::::      ::::::::::::::
 ASCII
-  printf "%s
-" "${RESET}"
+  printf "%s\n" "${RESET}"
 }
 
-log_step() { STEP=$((STEP + 1)); printf "%s[%s/%s]%s %s
-" "${CYAN}${BOLD}" "${STEP}" "${TOTAL_STEPS}" "${RESET}" "$1"; }
-log_ok() { printf "%s[OK]%s %s
-" "${GREEN}${BOLD}" "${RESET}" "$1"; }
-log_warn() { printf "%s[WARN]%s %s
-" "${YELLOW}${BOLD}" "${RESET}" "$1"; }
+log_step() { STEP=$((STEP + 1)); printf "%s[%s/%s]%s %s\n" "${CYAN}${BOLD}" "${STEP}" "${TOTAL_STEPS}" "${RESET}" "$1"; }
+log_ok() { printf "%s[OK]%s %s\n" "${GREEN}${BOLD}" "${RESET}" "$1"; }
+log_warn() { printf "%s[WARN]%s %s\n" "${YELLOW}${BOLD}" "${RESET}" "$1"; }
 on_error() {
   local exit_code="$?"
-  printf "%s[FEHLER]%s Abgebrochen in Zeile %s (Exit-Code: %s).
-" "${RED}${BOLD}" "${RESET}" "$1" "${exit_code}" >&2
+  printf "%s[FEHLER]%s Abgebrochen in Zeile %s (Exit-Code: %s).\n" "${RED}${BOLD}" "${RESET}" "$1" "${exit_code}" >&2
   exit "${exit_code}"
 }
 trap 'on_error ${LINENO}' ERR
@@ -56,15 +50,12 @@ TOTAL_STEPS=2
 STEP=0
 
 print_banner
-printf "%sBOLZO RMM – Deinstallation%s
-
-" "${BOLD}" "${RESET}"
-[[ "${EUID}" -eq 0 ]] || { printf "%sBitte mit sudo/root ausfuehren.%s
-" "${RED}${BOLD}" "${RESET}"; exit 1; }
+printf "%sBOLZO RMM – Deinstallation%s\n\n" "${BOLD}" "${RESET}"
+[[ "${EUID}" -eq 0 ]] || { printf "%sBitte mit sudo/root ausfuehren.%s\n" "${RED}${BOLD}" "${RESET}"; exit 1; }
 
 log_step "Dienst stoppen und entfernen"
-systemctl disable --now bolzo-rmm >/dev/null 2>&1 || true
-rm -f /etc/systemd/system/bolzo-rmm.service
+systemctl disable --now bolzo-rmm bolzo-rmm-update.path >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/bolzo-rmm.service /etc/systemd/system/bolzo-rmm-update.path /etc/systemd/system/bolzo-rmm-update.service
 systemctl daemon-reload
 rm -rf /opt/bolzo-rmm /opt/bolzo-rmm-src
 log_ok "Programm entfernt"
@@ -77,6 +68,4 @@ if [[ "${PURGE}" -eq 1 ]]; then
 else
   log_ok "Daten behalten: /var/lib/bolzo-rmm, /etc/bolzo-rmm (mit --purge komplett loeschen)"
 fi
-printf "
-%sDeinstallation abgeschlossen.%s
-" "${GREEN}${BOLD}" "${RESET}"
+printf "\n%sDeinstallation abgeschlossen.%s\n" "${GREEN}${BOLD}" "${RESET}"

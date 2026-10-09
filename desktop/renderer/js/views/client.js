@@ -44,7 +44,7 @@ export function renderClient(root, { go, params }) {
       <div class="detail-icon">${osIcon(a.platform)}</div>
       <div class="detail-title grow">
         <h1>${esc(a.name)} <button class="btn ghost sm icon-only" title="Umbenennen" data-rename>${icon('edit', 'sm')}</button></h1>
-        <div class="meta">${statusHtml(a)}<span>${esc(a.os || osLabel(a.platform))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}</div>
+        <div class="meta">${statusHtml(a)}<span>${esc(a.os || osLabel(a.platform))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}</div>
       </div>
       <div class="btn-group">
         ${a.online ? `

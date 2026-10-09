@@ -1,5 +1,6 @@
 import { api, LS } from '../api.js';
 import { icon, esc, $, $$, toast, modal, copyText, confirmDialog } from '../ui.js';
+import { renderUpdateCard } from '../updates.js';
 
 function installHtml(info) {
   return `
@@ -31,6 +32,8 @@ export function renderSettings(root, { go }) {
   root.innerHTML = `
     <div class="page-head"><h1>Einstellungen</h1></div>
     <div style="display:flex;flex-direction:column;gap:14px;max-width:900px">
+      <div class="card" data-updates></div>
+
       <div class="card">
         <div class="card-head">${icon('download', 'sm')}<h3>Clients hinzufügen (Install-Skripte)</h3><span class="spacer"></span>
           <button class="btn sm" data-rotate>${icon('key', 'sm')}Neuen Schlüssel erzeugen</button></div>
@@ -94,5 +97,7 @@ export function renderSettings(root, { go }) {
   const drawConn = () => ($('[data-conn]', root).innerHTML = api.connected ? '<span class="status"><span class="dot online"></span>Verbunden</span>' : '<span class="status"><span class="dot offline"></span>Getrennt – verbinde neu ...</span>');
   drawConn();
   $('[data-logout]', root).onclick = () => api.logout();
-  return api.on('conn', drawConn);
+  const offUpd = renderUpdateCard($('[data-updates]', root));
+  const offConn = api.on('conn', drawConn);
+  return () => { offUpd(); offConn(); };
 }

@@ -72,6 +72,7 @@ class Store {
     data.history ??= [];
     data.settings ??= {};
     data.settings.thresholds ??= { cpu: 90, mem: 90, disk: 90 };
+    data.settings.autoUpdateAgents ??= true;
     data.enrollKey ??= crypto.randomBytes(18).toString('base64url');
     if (!data.scripts) {
       data.scripts = DEFAULT_SCRIPTS.map((s) => ({

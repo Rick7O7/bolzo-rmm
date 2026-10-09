@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, shell, Menu, nativeTheme } = require('electron');
+const { app, BrowserWindow, shell, Menu, nativeTheme, ipcMain } = require('electron');
 const path = require('path');
 
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -54,6 +54,48 @@ app.on('second-instance', () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Auto-Update über GitHub-Releases (nur in der installierten App)
+// ---------------------------------------------------------------------------
+let updateState = { status: app.isPackaged ? 'idle' : 'dev', version: null, percent: 0, message: '' };
+function setUpdate(patch) {
+  updateState = { ...updateState, ...patch };
+  if (win && !win.isDestroyed()) win.webContents.send('update-state', updateState);
+}
+
+const firstLine = (e) => String(e?.message || e).split(/\r?\n/)[0];
+
+let autoUpdater = null;
+function initUpdater() {
+  if (!app.isPackaged) return;
+  ({ autoUpdater } = require('electron-updater'));
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('checking-for-update', () => setUpdate({ status: 'checking', message: '' }));
+  autoUpdater.on('update-available', (i) => setUpdate({ status: 'downloading', version: i.version, percent: 0 }));
+  autoUpdater.on('update-not-available', () => setUpdate({ status: 'none' }));
+  autoUpdater.on('download-progress', (p) => setUpdate({ status: 'downloading', percent: Math.round(p.percent) }));
+  autoUpdater.on('update-downloaded', (i) => setUpdate({ status: 'ready', version: i.version, percent: 100 }));
+  autoUpdater.on('error', (e) => setUpdate({ status: 'error', message: firstLine(e) }));
+  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  setTimeout(check, 5000);
+  setInterval(check, 4 * 3600e3);
+}
+
+ipcMain.handle('app-info', () => ({ version: app.getVersion(), packaged: app.isPackaged }));
+ipcMain.handle('update-state', () => updateState);
+ipcMain.handle('update-check', async () => {
+  if (!autoUpdater) return updateState;
+  await autoUpdater.checkForUpdates().catch((e) => setUpdate({ status: 'error', message: firstLine(e) }));
+  return updateState;
+});
+ipcMain.handle('update-install', () => {
+  if (autoUpdater && updateState.status === 'ready') setImmediate(() => autoUpdater.quitAndInstall(false, true));
+});
+
 app.setAppUserModelId('net.bolzo.rmm');
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  initUpdater();
+});
 app.on('window-all-closed', () => app.quit());

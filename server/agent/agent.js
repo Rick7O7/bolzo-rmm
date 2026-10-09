@@ -8,7 +8,9 @@ const cp = require('child_process');
 const crypto = require('crypto');
 const dgram = require('dgram');
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
+// Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
+const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
 const CFG_PATH = process.env.RMM_AGENT_CONFIG || path.join(__dirname, 'config.json');
 const METRICS_INTERVAL = 5000;
@@ -556,7 +558,7 @@ function connect() {
 
   ws.onopen = async () => {
     lastServerMsg = Date.now();
-    send({ type: 'hello', id: cfg.id, secret: cfg.secret, version: VERSION, info: await getInfo() });
+    send({ type: 'hello', id: cfg.id, secret: cfg.secret, version: VERSION, hash: CODE_HASH, info: await getInfo() });
   };
   ws.onmessage = (e) => {
     let msg;

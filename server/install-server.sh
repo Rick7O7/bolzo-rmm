@@ -39,6 +39,9 @@ fi
 info "Kopiere Programmdateien nach $APP ..."
 cp -r "$SRC/server.js" "$SRC/store.js" "$SRC/package.json" "$SRC/agent" "$SRC/templates" "$APP/"
 [ -f "$SRC/package-lock.json" ] && cp "$SRC/package-lock.json" "$APP/"
+# Versionsinfo für die Update-Anzeige in der App (von install.sh übergeben)
+COMMIT="${BOLZO_RMM_COMMIT:-unbekannt}" DATE="${BOLZO_RMM_DATE:-}" MESSAGE="${BOLZO_RMM_MESSAGE:-manuelle Installation}" \
+  "$APP/node/bin/node" -e 'const e=process.env; require("fs").writeFileSync(process.argv[1], JSON.stringify({commit:e.COMMIT, date:e.DATE||null, message:e.MESSAGE}))' "$APP/version.json"
 cd "$APP"
 info "Installiere Abhängigkeiten ..."
 PATH="$APP/node/bin:$PATH" npm install --omit=dev --no-audit --no-fund --silent
@@ -85,7 +88,37 @@ ReadWritePaths=$DATA
 WantedBy=multi-user.target
 EOF
 
+# Selbst-Update: Die App legt $DATA/update-request an (der Dienst darf nur dort schreiben).
+# Diese Path-Unit startet dann als root den Installer von GitHub.
+REPO_URL="${BOLZO_RMM_REPO:-https://github.com/Rick7O7/bolzo-rmm.git}"
+BRANCH="${BOLZO_RMM_BRANCH:-main}"
+REPO_SLUG="$(printf '%s' "$REPO_URL" | sed -E 's#^https://github.com/##; s#\.git$##')"
+cat > /etc/systemd/system/bolzo-rmm-update.service <<EOF
+[Unit]
+Description=BOLZO RMM Selbst-Update
+
+[Service]
+Type=oneshot
+TimeoutStartSec=900
+Environment=BOLZO_RMM_REPO=$REPO_URL
+Environment=BOLZO_RMM_BRANCH=$BRANCH
+ExecStartPre=/bin/rm -f $DATA/update-request
+ExecStart=/bin/bash -c 'curl -fsSL https://raw.githubusercontent.com/$REPO_SLUG/$BRANCH/install.sh | bash > $DATA/update.log 2>&1'
+EOF
+cat > /etc/systemd/system/bolzo-rmm-update.path <<EOF
+[Unit]
+Description=BOLZO RMM - auf Update-Anforderung warten
+
+[Path]
+PathExists=$DATA/update-request
+Unit=bolzo-rmm-update.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
+systemctl enable --now bolzo-rmm-update.path >/dev/null 2>&1
 systemctl enable bolzo-rmm >/dev/null 2>&1
 systemctl restart bolzo-rmm
 sleep 2

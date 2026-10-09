@@ -6,6 +6,7 @@ import { renderClient } from './views/client.js';
 import { renderScripts } from './views/scripts.js';
 import { renderHistory } from './views/history.js';
 import { renderSettings } from './views/settings.js';
+import { updates, initUpdates } from './updates.js';
 
 const app = $('#app');
 const NAV = [
@@ -68,6 +69,7 @@ function showShell() {
         <div class="brand"><img class="brand-mark" src="../build/icon.png" alt=""><span class="wordmark">BOLZO <span>RMM</span></span></div>
         <nav class="nav">${NAV.map((n) => `<a class="nav-item" href="${n.href}" style="text-decoration:none">${icon(n.icon)}${n.label}${n.href === '#/clients' ? '<span class="badge" data-online></span>' : ''}</a>`).join('')}</nav>
         <div class="sidebar-foot">
+          <a class="update-pill" href="#/settings" data-updpill hidden>${icon('download', 'sm')}<span></span></a>
           <div class="conn"><span class="dot" data-conndot></span><div style="min-width:0"><div data-connlabel>Verbinde ...</div><div class="host">${esc(api.server.replace(/^https?:\/\//, ''))}</div></div></div>
         </div>
       </aside>
@@ -90,6 +92,19 @@ function updateBadge() {
   const all = [...api.agents.values()];
   b.textContent = `${all.filter((a) => a.online).length}/${all.length}`;
 }
+
+// Hinweis unten in der Seitenleiste, sobald irgendein Update bereitsteht
+function updatePill() {
+  const pill = $('[data-updpill]');
+  if (!pill) return;
+  const parts = [];
+  if (updates.app.status === 'ready') parts.push(`App ${updates.app.version}`);
+  if (updates.server?.updateAvailable) parts.push('Server');
+  if (updates.server?.agent?.outdatedOnline) parts.push('Agents');
+  pill.hidden = !parts.length;
+  $('span', pill).textContent = `Update verfügbar: ${parts.join(', ')}`;
+}
+updates.on(updatePill);
 
 function route() {
   if (!api.loggedIn) return showLogin();
@@ -118,12 +133,20 @@ api.on('agent', ({ agent, prev }) => {
 });
 
 let waitingForFirstData = false;
+let updatesStarted = false;
 function start() {
   showShell();
   updateConn();
   waitingForFirstData = true;
   api.connect();
   route();
+  if (!updatesStarted) {
+    updatesStarted = true;
+    initUpdates();
+  } else {
+    updates.refreshServer();
+  }
+  updatePill();
 }
 
 api.on('conn', updateConn);
