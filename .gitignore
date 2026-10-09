@@ -1,0 +1,6 @@
+node_modules/
+server/data/
+server/.env
+desktop/dist/
+agent-test/
+*.log
