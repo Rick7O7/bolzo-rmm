@@ -68,15 +68,22 @@ Danach in `/etc/bolzo-rmm/bolzo-rmm.env` `PUBLIC_URL=https://rmm.deine-domain.de
 
 ## 2. Desktop-App
 
+**Installieren:** `BOLZO RMM Setup 1.0.0.exe` ausführen. Die App ist nicht signiert, deshalb zeigt
+Windows beim ersten Start evtl. „Der Computer wurde durch Windows geschützt" → **Weitere
+Informationen → Trotzdem ausführen**.
+
+Beim ersten Start Server-Adresse (z.B. `http://10.0.0.50:8095` oder `https://rmm.deine-domain.de`)
+und Admin-Passwort eingeben.
+
+**Selbst bauen / entwickeln:**
+
 ```bash
 cd desktop
 npm install
 npm start          # App direkt starten
-npm run dist       # Windows-Installer bauen -> desktop/dist/
+npm run dist       # Installer bauen -> desktop/dist/BOLZO RMM Setup <version>.exe
+npm run icon       # Icon/Logo-PNGs aus den SVGs in desktop/build/ neu erzeugen
 ```
-
-Beim ersten Start Server-Adresse (z.B. `http://10.0.0.50:8095` oder `https://rmm.deine-domain.de`)
-und Admin-Passwort eingeben.
 
 ## 3. Clients hinzufügen
 
