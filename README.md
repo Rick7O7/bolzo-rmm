@@ -1,4 +1,4 @@
-# RMM Desk
+# BOLZO RMM
 
 Fernwartung und Überwachung für Homelab und kleine Umgebungen – ähnlich wie Tactical RMM,
 aber mit einer **Windows-Desktop-App** statt Weboberfläche.
@@ -33,13 +33,13 @@ Empfohlen: ein eigener kleiner Debian/Ubuntu-LXC in Proxmox (512 MB RAM reichen,
 
 ```bash
 # Ordner server/ auf den Container kopieren, z.B.:
-scp -r server root@<container-ip>:/root/rmm-server-src
-ssh root@<container-ip> "bash /root/rmm-server-src/install-server.sh"
+scp -r server root@<container-ip>:/root/bolzo-rmm-src
+ssh root@<container-ip> "bash /root/bolzo-rmm-src/install-server.sh"
 ```
 
-Das Skript installiert eine eigene Node.js-Laufzeit nach `/opt/rmm-server`, legt den Dienst
-`rmm-server` an und **gibt das Admin-Passwort aus**. Konfiguration: `/etc/rmm-server/rmm.env`.
-Erneutes Ausführen aktualisiert den Server (Daten bleiben unter `/var/lib/rmm-server`).
+Das Skript installiert eine eigene Node.js-Laufzeit nach `/opt/bolzo-rmm`, legt den Dienst
+`bolzo-rmm` an und **gibt das Admin-Passwort aus**. Konfiguration: `/etc/bolzo-rmm/bolzo-rmm.env`.
+Erneutes Ausführen aktualisiert den Server (Daten bleiben unter `/var/lib/bolzo-rmm`).
 
 ### HTTPS (wichtig, sobald es übers Internet geht)
 
@@ -59,8 +59,8 @@ location / {
 }
 ```
 
-Danach in `/etc/rmm-server/rmm.env` `PUBLIC_URL=https://rmm.deine-domain.de` setzen und
-`systemctl restart rmm-server` ausführen. Alternativ nur über WireGuard/VPN erreichbar machen.
+Danach in `/etc/bolzo-rmm/bolzo-rmm.env` `PUBLIC_URL=https://rmm.deine-domain.de` setzen und
+`systemctl restart bolzo-rmm` ausführen. Alternativ nur über WireGuard/VPN erreichbar machen.
 
 ## 2. Desktop-App
 
@@ -83,9 +83,9 @@ passenden Einzeiler kopieren:
 - **Windows** (PowerShell als Administrator): `irm "https://…/install/windows.ps1?key=…" | iex`
 
 Der Client erscheint nach wenigen Sekunden im Dashboard. Der Agent bringt eine eigene
-Node.js-Laufzeit mit und läuft als systemd-Dienst `rmm-agent` bzw. als geplante Aufgabe
-`RMMDeskAgent` (Konto SYSTEM). Logs: `journalctl -u rmm-agent -f` bzw.
-`C:\Program Files\RMMDeskAgent\agent.log`.
+Node.js-Laufzeit mit und läuft als systemd-Dienst `bolzo-rmm-agent` bzw. als geplante Aufgabe
+`BolzoRMMAgent` (Konto SYSTEM). Logs: `journalctl -u bolzo-rmm-agent -f` bzw.
+`C:\Program Files\BolzoRMMAgent\agent.log`.
 
 ## Sicherheit
 

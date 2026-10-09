@@ -1,5 +1,5 @@
 'use strict';
-// RMM Desk Agent – läuft auf jedem verwalteten Client (Linux & Windows).
+// BOLZO RMM Agent – läuft auf jedem verwalteten Client (Linux & Windows).
 // Benötigt Node.js >= 22 (eingebauter WebSocket-Client), sonst keine Abhängigkeiten.
 const os = require('os');
 const fs = require('fs');
@@ -418,7 +418,7 @@ function closeShell(sid) {
 // ---------------------------------------------------------------------------
 function power(kind) {
   setTimeout(() => {
-    if (IS_WIN) cp.execFile('shutdown', [kind === 'reboot' ? '/r' : '/s', '/t', '5', '/f', '/c', 'RMM Desk'], { windowsHide: true }, () => {});
+    if (IS_WIN) cp.execFile('shutdown', [kind === 'reboot' ? '/r' : '/s', '/t', '5', '/f', '/c', 'BOLZO RMM'], { windowsHide: true }, () => {});
     else cp.execFile('systemctl', [kind === 'reboot' ? 'reboot' : 'poweroff'], (err) => {
       if (err) cp.execFile('shutdown', [kind === 'reboot' ? '-r' : '-h', 'now'], () => {});
     });
@@ -450,7 +450,7 @@ async function selfUpdate() {
   const res = await fetch(`${cfg.server}/agent/agent.js`);
   if (!res.ok) throw new Error(`Download fehlgeschlagen (${res.status})`);
   const code = await res.text();
-  if (!code.includes('RMM Desk Agent')) throw new Error('Unerwarteter Inhalt');
+  if (!code.includes('BOLZO RMM Agent')) throw new Error('Unerwarteter Inhalt');
   const target = path.join(__dirname, 'agent.js');
   fs.writeFileSync(target + '.new', code);
   fs.renameSync(target + '.new', target);
@@ -463,10 +463,10 @@ function uninstall() {
   setTimeout(() => {
     if (IS_WIN) {
       const dir = __dirname.replace(/'/g, "''");
-      const cmd = `Start-Sleep 3; Unregister-ScheduledTask -TaskName 'RMMDeskAgent' -Confirm:$false; Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*RMMDeskAgent\\run.cmd*') -or ($_.Name -eq 'node.exe' -and $_.ExecutablePath -like '${dir}*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Start-Sleep 2; Remove-Item -Recurse -Force '${dir}'`;
+      const cmd = `Start-Sleep 3; Unregister-ScheduledTask -TaskName 'BolzoRMMAgent' -Confirm:$false; Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*BolzoRMMAgent\\run.cmd*') -or ($_.Name -eq 'node.exe' -and $_.ExecutablePath -like '${dir}*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Start-Sleep 2; Remove-Item -Recurse -Force '${dir}'`;
       cp.spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     } else {
-      cp.spawn('sh', ['-c', `sleep 2; systemctl disable --now rmm-agent; rm -f /etc/systemd/system/rmm-agent.service; systemctl daemon-reload; rm -rf '${__dirname}'`], { detached: true, stdio: 'ignore' }).unref();
+      cp.spawn('sh', ['-c', `sleep 2; systemctl disable --now bolzo-rmm-agent; rm -f /etc/systemd/system/bolzo-rmm-agent.service; systemctl daemon-reload; rm -rf '${__dirname}'`], { detached: true, stdio: 'ignore' }).unref();
     }
   }, 500);
   return { ok: true };
@@ -591,7 +591,7 @@ async function main() {
     await sleep(3600e3);
     process.exit(0);
   }
-  log(`RMM Desk Agent ${VERSION} auf ${os.hostname()} (${process.platform}), Node ${process.version}`);
+  log(`BOLZO RMM Agent ${VERSION} auf ${os.hostname()} (${process.platform}), Node ${process.version}`);
   if (typeof WebSocket === 'undefined') {
     log('Node.js >= 22 wird benötigt.');
     process.exit(1);

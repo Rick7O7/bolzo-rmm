@@ -36,7 +36,7 @@ if (!ADMIN_PASSWORD) {
     fs.writeFileSync(pwFile, crypto.randomBytes(12).toString('base64url') + '\n', { mode: 0o600 });
   }
   ADMIN_PASSWORD = fs.readFileSync(pwFile, 'utf8').trim();
-  console.log(`[rmm] Kein ADMIN_PASSWORD gesetzt – verwende ${pwFile}`);
+  console.log(`[bolzo-rmm] Kein ADMIN_PASSWORD gesetzt – verwende ${pwFile}`);
 }
 
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest();
@@ -666,5 +666,5 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 }
 
 server.listen(PORT, HOST, () => {
-  log(`[rmm] Server läuft auf http://${HOST}:${PORT}  (Daten: ${DATA_DIR})`);
+  log(`[bolzo-rmm] Server läuft auf http://${HOST}:${PORT}  (Daten: ${DATA_DIR})`);
 });

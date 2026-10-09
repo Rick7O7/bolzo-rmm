@@ -1,4 +1,4 @@
-# RMM Desk – Agent-Installation für Windows
+# BOLZO RMM – Agent-Installation für Windows
 # Aufruf in einer PowerShell als Administrator:
 #   irm "__SERVER_URL__/install/windows.ps1?key=..." | iex
 $ErrorActionPreference = 'Stop'
@@ -8,9 +8,9 @@ $ProgressPreference = 'SilentlyContinue'
 & {
   $Server   = '__SERVER_URL__'
   $Key      = '__ENROLL_KEY__'
-  $Dir      = Join-Path $env:ProgramFiles 'RMMDeskAgent'
+  $Dir      = Join-Path $env:ProgramFiles 'BolzoRMMAgent'
   $NodeLine = 'latest-v22.x'
-  $TaskName = 'RMMDeskAgent'
+  $TaskName = 'BolzoRMMAgent'
 
   function Info($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
@@ -27,7 +27,7 @@ $ProgressPreference = 'SilentlyContinue'
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   }
   Get-CimInstance Win32_Process |
-    Where-Object { ($_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*RMMDeskAgent\run.cmd*') -or ($_.Name -eq 'node.exe' -and $_.ExecutablePath -like "$Dir*") } |
+    Where-Object { ($_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*BolzoRMMAgent\run.cmd*') -or ($_.Name -eq 'node.exe' -and $_.ExecutablePath -like "$Dir*") } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
   $nodeExe = Join-Path $Dir 'node\node.exe'
@@ -78,6 +78,6 @@ goto loop
   Start-ScheduledTask -TaskName $TaskName
 
   Start-Sleep -Seconds 4
-  Info "Fertig! $env:COMPUTERNAME erscheint jetzt in RMM Desk."
+  Info "Fertig! $env:COMPUTERNAME erscheint jetzt in BOLZO RMM."
   Info "Log: $Dir\agent.log"
 }

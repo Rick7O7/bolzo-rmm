@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# RMM Desk – Agent-Installation für Linux (systemd)
+# BOLZO RMM – Agent-Installation für Linux (systemd)
 # Aufruf: curl -fsSL "__SERVER_URL__/install/linux.sh?key=..." | sudo bash
 set -euo pipefail
 
 SERVER="__SERVER_URL__"
 KEY="__ENROLL_KEY__"
-DIR="/opt/rmm-agent"
+DIR="/opt/bolzo-rmm-agent"
 NODE_LINE="latest-v22.x"
 
 info() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -52,9 +52,9 @@ EOF
   chmod 600 "$DIR/config.json"
 fi
 
-cat > /etc/systemd/system/rmm-agent.service <<EOF
+cat > /etc/systemd/system/bolzo-rmm-agent.service <<EOF
 [Unit]
-Description=RMM Desk Agent
+Description=BOLZO RMM Agent
 After=network-online.target
 Wants=network-online.target
 
@@ -70,14 +70,14 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable rmm-agent >/dev/null 2>&1
-systemctl restart rmm-agent
+systemctl enable bolzo-rmm-agent >/dev/null 2>&1
+systemctl restart bolzo-rmm-agent
 
 sleep 3
-if systemctl is-active --quiet rmm-agent; then
-  info "Fertig! $(hostname) erscheint jetzt in RMM Desk."
-  info "Logs: journalctl -u rmm-agent -f"
+if systemctl is-active --quiet bolzo-rmm-agent; then
+  info "Fertig! $(hostname) erscheint jetzt in BOLZO RMM."
+  info "Logs: journalctl -u bolzo-rmm-agent -f"
 else
-  journalctl -u rmm-agent -n 20 --no-pager || true
+  journalctl -u bolzo-rmm-agent -n 20 --no-pager || true
   fail "Agent läuft nicht – siehe Log oben."
 fi

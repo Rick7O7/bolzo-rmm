@@ -13,7 +13,7 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 640,
-    title: 'RMM Desk',
+    title: 'BOLZO RMM',
     backgroundColor: '#0e0f11',
     icon: path.join(__dirname, 'build', 'icon.png'),
     titleBarStyle: 'hidden',
@@ -54,6 +54,6 @@ app.on('second-instance', () => {
   }
 });
 
-app.setAppUserModelId('net.rmmdesk.app');
+app.setAppUserModelId('net.bolzo.rmm');
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => app.quit());

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# RMM Desk – Server-Installation (Debian/Ubuntu mit systemd, z.B. Proxmox-LXC)
+# BOLZO RMM – Server-Installation (Debian/Ubuntu mit systemd, z.B. Proxmox-LXC)
 # Aufruf aus dem server/-Ordner:  sudo bash install-server.sh
 # Erneut ausführen = Update (Daten und Passwort bleiben erhalten).
 set -euo pipefail
 
-APP=/opt/rmm-server
-DATA=/var/lib/rmm-server
-CONF=/etc/rmm-server
+APP=/opt/bolzo-rmm
+DATA=/var/lib/bolzo-rmm
+CONF=/etc/bolzo-rmm
 PORT="${PORT:-8095}"
 NODE_LINE="latest-v22.x"
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -22,7 +22,7 @@ case "$(uname -m)" in
   x86_64) ARCH=x64 ;; aarch64|arm64) ARCH=arm64 ;; *) fail "Nicht unterstützte Architektur: $(uname -m)" ;;
 esac
 
-id rmm >/dev/null 2>&1 || useradd --system --home "$DATA" --shell /usr/sbin/nologin rmm
+id bolzo-rmm >/dev/null 2>&1 || useradd --system --home "$DATA" --shell /usr/sbin/nologin bolzo-rmm
 mkdir -p "$APP" "$DATA" "$CONF"
 
 if [ ! -x "$APP/node/bin/node" ]; then
@@ -44,10 +44,10 @@ info "Installiere Abhängigkeiten ..."
 PATH="$APP/node/bin:$PATH" npm install --omit=dev --no-audit --no-fund --silent
 
 NEW_PW=""
-if [ ! -f "$CONF/rmm.env" ]; then
+if [ ! -f "$CONF/bolzo-rmm.env" ]; then
   NEW_PW=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20)
-  cat > "$CONF/rmm.env" <<EOF
-# RMM Desk Server – Konfiguration (nach Änderung: systemctl restart rmm-server)
+  cat > "$CONF/bolzo-rmm.env" <<EOF
+# BOLZO RMM Server – Konfiguration (nach Änderung: systemctl restart bolzo-rmm)
 PORT=$PORT
 HOST=0.0.0.0
 DATA_DIR=$DATA
@@ -57,20 +57,20 @@ ADMIN_PASSWORD=$NEW_PW
 PUBLIC_URL=
 EOF
 fi
-chown -R rmm:rmm "$DATA"
-chown root:rmm "$CONF/rmm.env"
-chmod 640 "$CONF/rmm.env"
+chown -R bolzo-rmm:bolzo-rmm "$DATA"
+chown root:bolzo-rmm "$CONF/bolzo-rmm.env"
+chmod 640 "$CONF/bolzo-rmm.env"
 
-cat > /etc/systemd/system/rmm-server.service <<EOF
+cat > /etc/systemd/system/bolzo-rmm.service <<EOF
 [Unit]
-Description=RMM Desk Server
+Description=BOLZO RMM Server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=rmm
-Group=rmm
-EnvironmentFile=$CONF/rmm.env
+User=bolzo-rmm
+Group=bolzo-rmm
+EnvironmentFile=$CONF/bolzo-rmm.env
 WorkingDirectory=$APP
 ExecStart=$APP/node/bin/node $APP/server.js
 Restart=always
@@ -86,16 +86,16 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable rmm-server >/dev/null 2>&1
-systemctl restart rmm-server
+systemctl enable bolzo-rmm >/dev/null 2>&1
+systemctl restart bolzo-rmm
 sleep 2
-systemctl is-active --quiet rmm-server || { journalctl -u rmm-server -n 30 --no-pager; fail "Server startet nicht."; }
+systemctl is-active --quiet bolzo-rmm || { journalctl -u bolzo-rmm -n 30 --no-pager; fail "Server startet nicht."; }
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo
-info "RMM Desk Server läuft:  http://$IP:$PORT"
+info "BOLZO RMM Server läuft:  http://$IP:$PORT"
 if [ -n "$NEW_PW" ]; then
   info "Admin-Passwort:        $NEW_PW"
-  echo "    (steht auch in $CONF/rmm.env – bitte notieren)"
+  echo "    (steht auch in $CONF/bolzo-rmm.env – bitte notieren)"
 fi
-info "Logs: journalctl -u rmm-server -f"
+info "Logs: journalctl -u bolzo-rmm -f"

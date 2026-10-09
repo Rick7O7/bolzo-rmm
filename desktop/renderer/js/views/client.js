@@ -93,7 +93,7 @@ export function renderClient(root, { go, params }) {
         { k: 'update', label: 'Agent aktualisieren', icon: 'download' },
         { k: 'uninstall', label: 'Agent deinstallieren', icon: 'trash', danger: true },
       ] : []),
-      { k: 'delete', label: 'Aus RMM Desk entfernen', icon: 'x', danger: true },
+      { k: 'delete', label: 'Aus BOLZO RMM entfernen', icon: 'x', danger: true },
     ];
     const r = anchor.getBoundingClientRect();
     const menu = el(`<div class="menu" style="top:${r.bottom + 6}px;right:${window.innerWidth - r.right}px">${items.map((i) => `<button class="menu-item ${i.danger ? 'danger' : ''}" data-k="${i.k}">${icon(i.icon, 'sm')}${i.label}</button>`).join('')}</div>`);
@@ -117,7 +117,7 @@ export function renderClient(root, { go, params }) {
           return toast('Agent wird deinstalliert');
         }
         if (k === 'delete') {
-          if (!(await confirmDialog({ title: 'Client entfernen?', text: `<b>${esc(a.name)}</b> wird aus RMM Desk gelöscht. Ein noch installierter Agent kann sich danach nicht mehr verbinden.`, okText: 'Entfernen', danger: true }))) return;
+          if (!(await confirmDialog({ title: 'Client entfernen?', text: `<b>${esc(a.name)}</b> wird aus BOLZO RMM gelöscht. Ein noch installierter Agent kann sich danach nicht mehr verbinden.`, okText: 'Entfernen', danger: true }))) return;
           await api.del(`/api/agents/${id}`);
           toast('Client entfernt');
           return go('#/clients');

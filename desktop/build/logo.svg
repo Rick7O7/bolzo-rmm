@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bolzo-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c1c1f"/>
+      <stop offset="1" stop-color="#0c0c0d"/>
+    </linearGradient>
+    <radialGradient id="bolzo-glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#e04646" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#e04646" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bolzo-red" gradientUnits="userSpaceOnUse" x1="0" y1="93" x2="0" y2="423">
+      <stop offset="0" stop-color="#ff5c5c"/>
+      <stop offset="1" stop-color="#c92f2f"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bolzo-bg)"/>
+  <circle cx="256" cy="256" r="210" fill="url(#bolzo-glow)"/>
+  <rect x="19" y="19" width="474" height="474" rx="109" fill="none" stroke="#e04646" stroke-opacity="0.55" stroke-width="6"/>
+  <g transform="translate(-17 0)" fill="none" stroke="url(#bolzo-red)" stroke-width="54" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M180 120 V396"/>
+    <path d="M180 120 H282 a68 68 0 0 1 0 136 H180"/>
+    <path d="M180 256 H296 a70 70 0 0 1 0 140 H180"/>
+  </g>
+</svg>

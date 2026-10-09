@@ -1,13 +1,14 @@
 {
-  "name": "rmm-desk",
-  "productName": "RMM Desk",
+  "name": "bolzo-rmm",
+  "productName": "BOLZO RMM",
   "version": "1.0.0",
   "description": "Desktop-App zur Fernwartung und Überwachung deiner Clients",
   "main": "main.js",
   "private": true,
-  "author": "RMM Desk",
+  "author": "BOLZO RMM",
   "scripts": {
     "start": "electron .",
+    "icon": "electron build/render-icon.js",
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable"
   },
@@ -20,8 +21,8 @@
     "electron-builder": "^26.0.12"
   },
   "build": {
-    "appId": "net.rmmdesk.app",
-    "productName": "RMM Desk",
+    "appId": "net.bolzo.rmm",
+    "productName": "BOLZO RMM",
     "files": [
       "main.js",
       "preload.js",
@@ -38,7 +39,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "shortcutName": "RMM Desk"
+      "shortcutName": "BOLZO RMM"
     }
   }
 }

@@ -13,7 +13,7 @@ function installHtml(info) {
       <span class="hint">In einer PowerShell <b>als Administrator</b> ausführen.</span>
       <div class="cmd-box"><pre>${esc(info.windows)}</pre><button class="btn icon-only" data-copy="windows" title="Kopieren">${icon('copy', 'sm')}</button></div>
     </div>
-    <div class="hint" style="font-size:12.5px;color:var(--muted)">Der Client erscheint nach etwa 10–30 Sekunden automatisch im Dashboard. Das Skript lädt eine eigene Node.js-Laufzeit (~30 MB) nach <span class="mono">/opt/rmm-agent</span> bzw. <span class="mono">C:\\Program Files\\RMMDeskAgent</span>.</div>`;
+    <div class="hint" style="font-size:12.5px;color:var(--muted)">Der Client erscheint nach etwa 10–30 Sekunden automatisch im Dashboard. Das Skript lädt eine eigene Node.js-Laufzeit (~30 MB) nach <span class="mono">/opt/bolzo-rmm-agent</span> bzw. <span class="mono">C:\\Program Files\\BolzoRMMAgent</span>.</div>`;
 }
 
 function bindCopy(root, info) {

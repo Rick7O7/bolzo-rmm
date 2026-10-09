@@ -1,7 +1,7 @@
 {
-  "name": "rmm-desk-server",
+  "name": "bolzo-rmm-server",
   "version": "1.0.0",
-  "description": "Server für RMM Desk – verwaltet Agents und stellt die API für die Desktop-App bereit",
+  "description": "Server für BOLZO RMM – verwaltet Agents und stellt die API für die Desktop-App bereit",
   "main": "server.js",
   "type": "commonjs",
   "private": true,

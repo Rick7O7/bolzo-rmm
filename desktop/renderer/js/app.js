@@ -34,8 +34,8 @@ function showLogin(error = '') {
   app.innerHTML = `
     <div class="login"><div class="drag"></div>
       <form class="card login-card">
-        <div class="brand-mark">${icon('activity')}</div>
-        <div><h1>RMM Desk</h1><p>Mit deinem RMM-Server verbinden</p></div>
+        <img class="brand-mark" src="../build/icon.png" alt="">
+        <div><h1 class="wordmark">BOLZO <span>RMM</span></h1><p>Mit deinem BOLZO-RMM-Server verbinden</p></div>
         <div class="field"><label>Server-Adresse</label><input class="input" name="server" placeholder="https://rmm.example.de" value="${esc(api.server)}" required></div>
         <div class="field"><label>Admin-Passwort</label><input class="input" name="password" type="password" required autofocus></div>
         <div class="err-text">${esc(error)}</div>
@@ -65,7 +65,7 @@ function showShell() {
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
-        <div class="brand"><div class="brand-mark">${icon('activity')}</div>RMM Desk</div>
+        <div class="brand"><img class="brand-mark" src="../build/icon.png" alt=""><span class="wordmark">BOLZO <span>RMM</span></span></div>
         <nav class="nav">${NAV.map((n) => `<a class="nav-item" href="${n.href}" style="text-decoration:none">${icon(n.icon)}${n.label}${n.href === '#/clients' ? '<span class="badge" data-online></span>' : ''}</a>`).join('')}</nav>
         <div class="sidebar-foot">
           <div class="conn"><span class="dot" data-conndot></span><div style="min-width:0"><div data-connlabel>Verbinde ...</div><div class="host">${esc(api.server.replace(/^https?:\/\//, ''))}</div></div></div>
