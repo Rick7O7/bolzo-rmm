@@ -2,23 +2,35 @@ import { api, LS } from '../api.js';
 import { icon, esc, $, $$, toast, modal, copyText, confirmDialog } from '../ui.js';
 import { renderUpdateCard } from '../updates.js';
 
+// Ältere Server liefern nur linux/windows ohne Varianten
+const variantsOf = (info) => info.variants || [{ label: '', linux: info.linux, windows: info.windows }];
+
 function installHtml(info) {
-  return `
+  const variants = variantsOf(info);
+  const block = (v, i) => `
+    ${v.label ? `<div class="section-title" style="margin:${i ? 10 : 0}px 0 -4px;color:var(--text)">${icon('globe', 'sm')}${esc(v.label)}</div>` : ''}
     <div class="field">
       <div class="os-head">${icon('linux')}Linux (Debian, Ubuntu, Proxmox, Raspberry Pi ...)</div>
       <span class="hint">Als root bzw. mit sudo im Terminal des Clients ausführen. Benötigt systemd und curl.</span>
-      <div class="cmd-box"><pre>${esc(info.linux)}</pre><button class="btn icon-only" data-copy="linux" title="Kopieren">${icon('copy', 'sm')}</button></div>
+      <div class="cmd-box"><pre>${esc(v.linux)}</pre><button class="btn icon-only" data-copy="${i}:linux" title="Kopieren">${icon('copy', 'sm')}</button></div>
     </div>
     <div class="field">
       <div class="os-head">${icon('windows')}Windows 10 / 11 / Server</div>
       <span class="hint">In einer PowerShell <b>als Administrator</b> ausführen.</span>
-      <div class="cmd-box"><pre>${esc(info.windows)}</pre><button class="btn icon-only" data-copy="windows" title="Kopieren">${icon('copy', 'sm')}</button></div>
-    </div>
+      <div class="cmd-box"><pre>${esc(v.windows)}</pre><button class="btn icon-only" data-copy="${i}:windows" title="Kopieren">${icon('copy', 'sm')}</button></div>
+    </div>`;
+  return `
+    ${variants.length > 1 ? `<div class="hint" style="font-size:12.5px;color:var(--text-2)">Clients im selben Netz wie der Server brauchen meist die <b>Heimnetz</b>-Variante – viele Router lassen interne Geräte nicht über die eigene öffentliche Adresse herein. Geräte außerhalb nehmen <b>Von außen</b>.</div>` : ''}
+    ${variants.map(block).join('')}
     <div class="hint" style="font-size:12.5px;color:var(--muted)">Der Client erscheint nach etwa 10–30 Sekunden automatisch im Dashboard. Das Skript lädt eine eigene Node.js-Laufzeit (~30 MB) nach <span class="mono">/opt/bolzo-rmm-agent</span> bzw. <span class="mono">C:\\Program Files\\BolzoRMMAgent</span>.</div>`;
 }
 
 function bindCopy(root, info) {
-  $$('[data-copy]', root).forEach((b) => (b.onclick = () => copyText(info[b.dataset.copy])));
+  const variants = variantsOf(info);
+  $$('[data-copy]', root).forEach((b) => {
+    const [i, os] = b.dataset.copy.split(':');
+    b.onclick = () => copyText(variants[i][os]);
+  });
 }
 
 export async function addClientDialog() {

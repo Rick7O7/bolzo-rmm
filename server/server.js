@@ -151,10 +151,6 @@ app.use((req, res, next) => {
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-function baseUrl(req) {
-  return PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
-}
-
 function validSession(token) {
   if (!token) return false;
   const s = store.data.sessions[sha256hex(token)];
@@ -485,15 +481,33 @@ app.post('/api/update/agents', requireAdmin, wrap(async (req, res) => {
   res.json({ requested: ids.length, ok: results.filter((r) => r.status === 'fulfilled').length });
 }));
 
-function enrollInfo(req) {
-  const url = baseUrl(req);
-  const key = store.data.enrollKey;
+// Adresse, unter der dieser Request den Server erreicht hat
+function requestUrl(req) {
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+function installCommands(url, key) {
   return {
-    serverUrl: url,
-    key,
-    linux: `curl -fsSL "${url}/install/linux.sh?key=${key}" | sudo bash`,
-    windows: `[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm "${url}/install/windows.ps1?key=${key}" | iex`,
+    url,
+    linux: `curl -fsSL --connect-timeout 10 "${url}/install/linux.sh?key=${key}" | sudo bash`,
+    windows: `[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm -TimeoutSec 15 "${url}/install/windows.ps1?key=${key}" | iex`,
   };
+}
+
+// Ist PUBLIC_URL gesetzt und erreicht die App den Server anders (z.B. per LAN-IP),
+// gibt es zwei Befehlssätze: Clients im Heimnetz kommen oft nicht über die
+// öffentliche Adresse herein (kein Hairpin-NAT im Router).
+function enrollInfo(req) {
+  const key = store.data.enrollKey;
+  const direct = requestUrl(req);
+  const variants = [];
+  if (PUBLIC_URL && PUBLIC_URL !== direct) {
+    variants.push({ label: `Von außen (${PUBLIC_URL.replace(/^https?:\/\//, '')})`, ...installCommands(PUBLIC_URL, key) });
+    variants.push({ label: `Im Heimnetz / direkt (${direct.replace(/^https?:\/\//, '')})`, ...installCommands(direct, key) });
+  } else {
+    variants.push({ label: '', ...installCommands(PUBLIC_URL || direct, key) });
+  }
+  return { serverUrl: variants[0].url, key, linux: variants[0].linux, windows: variants[0].windows, variants };
 }
 
 app.get('/api/enroll', requireAdmin, (req, res) => res.json(enrollInfo(req)));
@@ -510,9 +524,10 @@ function checkKey(req) {
   if (!key || !safeEqual(key, store.data.enrollKey)) throw httpError(403, 'Ungültiger Installationsschlüssel');
 }
 
+// Der Agent verbindet sich später über genau die Adresse, über die das Skript geladen wurde.
 function renderTemplate(name, req) {
   return fs.readFileSync(path.join(__dirname, 'templates', name), 'utf8')
-    .replaceAll('__SERVER_URL__', baseUrl(req))
+    .replaceAll('__SERVER_URL__', requestUrl(req))
     .replaceAll('__ENROLL_KEY__', store.data.enrollKey);
 }
 
