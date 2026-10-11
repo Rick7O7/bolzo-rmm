@@ -188,6 +188,7 @@ export function renderClient(root, { go, params }) {
         ['CPU', i.cpuModel ? `${i.cpuModel} (${i.cores} Threads)` : ''],
         ['RAM', fmtBytes(i.memTotal)],
         ['Agent', `${a.version || '?'} · Node ${i.nodeVersion || '?'}`],
+        ['Verbunden über', (a.serverUrl || '').replace(/^https?:\/\//, '')],
         ['Registriert', a.createdAt ? new Date(a.createdAt).toLocaleDateString('de-DE') : ''],
       ].filter(([, v]) => v).map(([k, v]) => `<div class="k">${k}</div><div class="v">${esc(v)}</div>`).join('');
 

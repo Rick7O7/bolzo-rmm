@@ -91,6 +91,7 @@ function summarize(a, withSpark = false) {
     notes: a.notes || '',
     version: a.version || '',
     outdated: agentOutdated(a),
+    serverUrl: a.serverUrl || '',
     publicIp: a.publicIp || '',
     createdAt: a.createdAt,
     lastSeen: online ? Date.now() : a.lastSeen,
@@ -164,7 +165,7 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-app.get('/health', (req, res) => res.json({ ok: true, agents: Object.keys(store.data.agents).length, online: conns.size }));
+app.get('/health', (req, res) => res.json({ ok: true, id: store.data.serverId, agents: Object.keys(store.data.agents).length, online: conns.size }));
 
 // ---- Login ----------------------------------------------------------------
 const loginFails = new Map(); // ip -> [timestamps]
@@ -535,6 +536,36 @@ function enrollInfo(req) {
 
 app.get('/api/enroll', requireAdmin, (req, res) => res.json(enrollInfo(req)));
 
+// Agents auf eine andere Server-Adresse umziehen. Jeder Agent probiert die Adressen
+// der Reihe nach (öffentlich zuerst, dann Heimnetz) und wechselt nur, wenn dort
+// dieser Server erreichbar ist.
+const versionAtLeast = (v, min) => {
+  const a = String(v || '0').split('.').map(Number), b = min.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  return true;
+};
+
+app.post('/api/agents/migrate', requireAdmin, wrap(async (req, res) => {
+  const urls = Array.isArray(req.body?.urls) && req.body.urls.length
+    ? req.body.urls.map(String)
+    : enrollInfo(req).variants.map((v) => v.url);
+  const only = Array.isArray(req.body?.agentIds) ? new Set(req.body.agentIds) : null;
+  const ids = [...conns.keys()].filter((id) => store.data.agents[id] && (!only || only.has(id)));
+  log(`[migrate] ${ids.length} Agent(s) -> ${urls.join(' | ')}`);
+  const results = await Promise.all(ids.map(async (id) => {
+    const a = store.data.agents[id];
+    const base = { id, hostname: a.name || a.info?.hostname || id, from: a.serverUrl || '' };
+    if (!versionAtLeast(a.version, '1.2.0')) return { ...base, ok: false, error: 'Agent zu alt – zuerst aktualisieren' };
+    try {
+      const r = await agentRequest(id, 'setServer', { urls, serverId: store.data.serverId }, 45000);
+      return { ...base, ok: true, ...r };
+    } catch (e) {
+      return { ...base, ok: false, error: e.message };
+    }
+  }));
+  res.json({ urls, results });
+}));
+
 app.post('/api/enroll/rotate', requireAdmin, (req, res) => {
   store.data.enrollKey = crypto.randomBytes(18).toString('base64url');
   store.save();
@@ -645,7 +676,7 @@ wssAgent.on('connection', (ws, req) => {
       const old = conns.get(agentId);
       if (old) old.ws.close(4002, 'replaced');
       conns.set(agentId, { ws, pending: new Map() });
-      Object.assign(a, { info: msg.info, version: msg.version, agentHash: msg.hash || '', publicIp: clientIp(req), lastSeen: Date.now() });
+      Object.assign(a, { info: msg.info, version: msg.version, agentHash: msg.hash || '', serverUrl: msg.serverUrl || '', publicIp: clientIp(req), lastSeen: Date.now() });
       store.save();
       sendJson(ws, { type: 'welcome' });
       if (store.data.settings.autoUpdateAgents && agentOutdated(a) && Date.now() - (a.lastAutoUpdate || 0) > 10 * 60e3) {

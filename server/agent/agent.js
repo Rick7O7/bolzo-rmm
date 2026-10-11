@@ -8,7 +8,7 @@ const cp = require('child_process');
 const crypto = require('crypto');
 const dgram = require('dgram');
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -480,6 +480,43 @@ function uninstall() {
 let ws = null;
 let lastServerMsg = Date.now();
 
+// ---------------------------------------------------------------------------
+// Umzug auf eine andere Server-Adresse
+// ---------------------------------------------------------------------------
+// Probiert die Adressen der Reihe nach und nimmt die erste, unter der genau dieser
+// Server (gleiche serverId) erreichbar ist. Klappt danach keine Verbindung, kehrt
+// der Agent nach einigen Versuchen automatisch zur alten Adresse zurück.
+async function probeServer(url, serverId) {
+  const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const h = await res.json();
+  if (!h.ok) throw new Error('keine gültige Antwort');
+  if (serverId && h.id !== serverId) throw new Error('anderer Server');
+}
+
+async function setServer({ urls, serverId }) {
+  const list = (Array.isArray(urls) ? urls : [urls]).map((u) => String(u || '').replace(/\/+$/, '')).filter((u) => /^https?:\/\/[^\s"']+$/.test(u));
+  if (!list.length) throw new Error('Keine gültige Adresse');
+  const tried = [];
+  for (const url of list) {
+    if (url === cfg.server) return { changed: false, url, tried, note: 'nutzt diese Adresse bereits' };
+    try {
+      await probeServer(url, serverId);
+    } catch (e) {
+      tried.push({ url, error: e.message });
+      continue;
+    }
+    cfg.pendingSwitch = { previous: cfg.server, at: Date.now(), failures: 0 };
+    cfg.server = url;
+    saveCfg();
+    log(`Server-Adresse gewechselt auf ${url} (vorher ${cfg.pendingSwitch.previous})`);
+    // Antwort noch über die alte Verbindung senden lassen, dann neu verbinden
+    setTimeout(() => ws?.close(), 500);
+    return { changed: true, url, tried };
+  }
+  return { changed: false, url: cfg.server, tried, note: 'keine der Adressen erreichbar – alte Adresse bleibt' };
+}
+
 function send(msg) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
 }
@@ -499,6 +536,7 @@ const actions = {
   shutdown: () => power('shutdown'),
   wol,
   update: selfUpdate,
+  setServer,
   uninstall,
   'shell.open': openShell,
 };
@@ -558,7 +596,7 @@ function connect() {
 
   ws.onopen = async () => {
     lastServerMsg = Date.now();
-    send({ type: 'hello', id: cfg.id, secret: cfg.secret, version: VERSION, hash: CODE_HASH, info: await getInfo() });
+    send({ type: 'hello', id: cfg.id, secret: cfg.secret, version: VERSION, hash: CODE_HASH, serverUrl: cfg.server, info: await getInfo() });
   };
   ws.onmessage = (e) => {
     let msg;
@@ -567,6 +605,10 @@ function connect() {
       welcomed = true;
       backoff = 2000;
       log(`Verbunden mit ${cfg.server}`);
+      if (cfg.pendingSwitch) {
+        delete cfg.pendingSwitch; // Umzug bestätigt
+        saveCfg();
+      }
       send({ type: 'metrics', metrics: collectMetrics() });
       return;
     }
@@ -580,6 +622,14 @@ function connect() {
   ws.onclose = () => {
     for (const sid of [...shells.keys()]) closeShell(sid);
     ws = null;
+    // Nach einem Umzug: kommt keine Verbindung zustande, zurück zur alten Adresse
+    if (!welcomed && cfg.pendingSwitch && ++cfg.pendingSwitch.failures >= 4) {
+      log(`Neue Adresse ${cfg.server} nicht erreichbar – zurück zu ${cfg.pendingSwitch.previous}`);
+      cfg.server = cfg.pendingSwitch.previous;
+      delete cfg.pendingSwitch;
+      saveCfg();
+      backoff = 2000;
+    }
     const wait = welcomed ? 2000 : backoff;
     if (!welcomed) backoff = Math.min(backoff * 2, 60000);
     setTimeout(connect, wait);

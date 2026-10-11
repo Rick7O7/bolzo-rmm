@@ -74,6 +74,7 @@ class Store {
     data.settings.thresholds ??= { cpu: 90, mem: 90, disk: 90 };
     data.settings.autoUpdateAgents ??= true;
     data.enrollKey ??= crypto.randomBytes(18).toString('base64url');
+    data.serverId ??= crypto.randomUUID(); // Agents prüfen beim Adresswechsel, dass es derselbe Server ist
     if (!data.scripts) {
       data.scripts = DEFAULT_SCRIPTS.map((s) => ({
         id: crypto.randomUUID(),
