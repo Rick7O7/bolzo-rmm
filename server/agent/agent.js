@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -605,7 +605,7 @@ function parseNet(str) {
     tag: kv.tag || '', firewall: kv.firewall === '1', ip: kv.ip || '', gw: kv.gw || '', rate: kv.rate || '',
   };
 }
-const buildNet = (parts) => parts.map(([k, v]) => (v === '' && !k.includes('=') ? k : `${k}=${v}`)).join(',');
+const buildNet = (parts) => parts.map(([k, v]) => (v === '' ? k : `${k}=${v}`)).join(',');
 function setPart(parts, key, value) {
   const i = parts.findIndex(([k]) => k === key);
   if (value === '' || value == null) { if (i >= 0) parts.splice(i, 1); return; }
@@ -623,6 +623,12 @@ async function pveConfigGet(p) {
     memory: Number(c.memory) || 512, swap: Number(c.swap) || 0, onboot: Number(c.onboot) === 1,
     startup: { order: startup.order || '', up: startup.up || '', down: startup.down || '' },
     tags: normTags(c.tags), description: c.description || '', ostype: c.ostype || '',
+    protection: Number(c.protection) === 1,
+    disks: Object.keys(c).filter((k) => /^(scsi|virtio|sata|ide|efidisk|tpmstate|unused)\d+$|^rootfs$|^mp\d+$/.test(k)).sort()
+      .map((k) => {
+        const v = String(c[k]);
+        return { key: k, volume: v.split(',')[0], size: (v.match(/(?:^|,)size=([^,]+)/) || [])[1] || '', cdrom: /media=cdrom/.test(v), mount: (v.match(/(?:^|,)mp=([^,]+)/) || [])[1] || '' };
+      }),
     nets: Object.keys(c).filter((k) => /^net\d+$/.test(k)).sort().map((k) => {
       const { parts, ...n } = parseNet(c[k]);
       return { key: k, ...n };
@@ -645,6 +651,11 @@ async function pveConfigSet(p) {
   if ('memory' in ch) args.push('--memory', String(intIn(ch.memory, 16, 8388608, 'RAM (MB)')));
   if ('swap' in ch && type === 'lxc') args.push('--swap', String(intIn(ch.swap, 0, 8388608, 'Swap (MB)')));
   if ('onboot' in ch) args.push('--onboot', ch.onboot ? '1' : '0');
+  if ('protection' in ch) args.push('--protection', ch.protection ? '1' : '0');
+  for (const key of Array.isArray(ch.removeNets) ? ch.removeNets : []) {
+    if (!/^net\d+$/.test(key)) throw new Error('Ungültige Netzwerkkarte');
+    del.push(key);
+  }
   if ('startup' in ch) {
     const st = ch.startup || {};
     const sp = [];
@@ -664,8 +675,14 @@ async function pveConfigSet(p) {
   if (Array.isArray(ch.nets) && ch.nets.length) {
     const cur = TEST_PVE ? {} : await pvesh('get', `${guestBase(vmid, type)}/config`);
     for (const n of ch.nets) {
-      if (!/^net\d+$/.test(n.key) || (!TEST_PVE && !cur[n.key])) throw new Error(`Unbekannte Netzwerkkarte ${n.key}`);
-      const { parts } = parseNet(cur[n.key] || '');
+      if (!/^net\d+$/.test(n.key)) throw new Error(`Ungültige Netzwerkkarte ${n.key}`);
+      if (n.create && cur[n.key]) throw new Error(`${n.key} gibt es bereits`);
+      if (!n.create && !TEST_PVE && !cur[n.key]) throw new Error(`Unbekannte Netzwerkkarte ${n.key}`);
+      // Neue Karte: Proxmox vergibt die MAC-Adresse selbst
+      const { parts } = n.create
+        ? { parts: type === 'lxc' ? [['name', `eth${n.key.slice(3)}`], ['type', 'veth'], ['ip', 'dhcp']] : [['virtio', '']] }
+        : parseNet(cur[n.key] || '');
+      if (n.create && !n.bridge) throw new Error('Bitte eine Brücke wählen');
       if ('bridge' in n) {
         if (!IFACE_RE.test(n.bridge)) throw new Error('Ungültige Brücke');
         setPart(parts, 'bridge', n.bridge);
@@ -688,6 +705,21 @@ async function pveConfigSet(p) {
   await pvesh('set', `${guestBase(vmid, type)}/config`, args);
   const pending = await pvesh('get', `${guestBase(vmid, type)}/pending`).catch(() => []);
   return { ok: true, changed: true, pending: (pending || []).filter((x) => x.pending !== undefined || x.delete).map((x) => x.key) };
+}
+
+// Messwerte der letzten Stunde/des letzten Tages aus der Proxmox-Statistik
+async function pveRrd(p) {
+  const { vmid, type } = checkGuest(p);
+  const timeframe = ['hour', 'day', 'week'].includes(p.timeframe) ? p.timeframe : 'hour';
+  if (TEST_PVE) {
+    const now = Date.now();
+    return Array.from({ length: 60 }, (_, i) => ({ t: now - (59 - i) * 60e3, cpu: 5 + 4 * Math.sin(i / 5) + (i % 7), mem: 40 + 3 * Math.sin(i / 9), netin: 2e4 * (1 + Math.sin(i / 4)), netout: 8e3 * (1 + Math.cos(i / 6)) }));
+  }
+  const rows = (await pvesh('get', `${guestBase(vmid, type)}/rrddata`, ['--timeframe', timeframe, '--cf', 'AVERAGE'])) || [];
+  return rows.filter((r) => r.time && r.cpu != null).map((r) => ({
+    t: r.time * 1000, cpu: Math.round((r.cpu || 0) * 1000) / 10, mem: r.maxmem ? Math.round((1000 * (r.mem || 0)) / r.maxmem) / 10 : 0,
+    netin: r.netin || 0, netout: r.netout || 0,
+  }));
 }
 
 // ---------- Snapshots ----------
@@ -869,6 +901,10 @@ function testFixture(kind, type) {
     case 'config': return {
       name: type === 'lxc' ? 'test-ct' : 'test-vm', cores: 2, sockets: 1, memory: 4096, swap: 512, onboot: true,
       startup: { order: '2', up: '30', down: '' }, tags: ['web', 'prod'], description: 'Testgast\nzweite Zeile', ostype: type === 'lxc' ? 'debian' : 'win11',
+      protection: false,
+      disks: type === 'lxc'
+        ? [{ key: 'rootfs', volume: 'local-lvm:vm-102-disk-0', size: '8G', cdrom: false, mount: '' }, { key: 'mp0', volume: 'nas:102/vm-102-disk-1.raw', size: '100G', cdrom: false, mount: '/data' }]
+        : [{ key: 'scsi0', volume: 'local-lvm:vm-101-disk-0', size: '64G', cdrom: false, mount: '' }, { key: 'ide2', volume: 'local:iso/virtio-win.iso', size: '', cdrom: true, mount: '' }],
       nets: [type === 'lxc'
         ? { key: 'net0', model: '', mac: 'bc:24:11:00:00:02', name: 'eth0', bridge: 'vmbr0', tag: '', firewall: true, ip: '10.2.30.52/24', gw: '10.2.30.1', rate: '' }
         : { key: 'net0', model: 'virtio', mac: 'bc:24:11:00:00:01', name: '', bridge: 'vmbr0', tag: '20', firewall: false, ip: '', gw: '', rate: '' }],
@@ -1255,6 +1291,7 @@ const actions = {
   'fs.upload': fsUpload,
   'pve.config.get': pveConfigGet,
   'pve.config.set': pveConfigSet,
+  'pve.rrd': pveRrd,
   'pve.snap.list': pveSnapList,
   'pve.snap': pveSnap,
   'pve.backup.info': pveBackupInfo,

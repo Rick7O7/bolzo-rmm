@@ -7,6 +7,7 @@ import { renderScripts } from './views/scripts.js';
 import { renderHistory } from './views/history.js';
 import { renderSettings } from './views/settings.js';
 import { renderPve } from './views/pve.js';
+import { renderGuest } from './views/guest.js';
 import { updates, initUpdates } from './updates.js';
 
 const app = $('#app');
@@ -27,6 +28,7 @@ const ROUTES = {
   scripts: renderScripts,
   history: renderHistory,
   proxmox: renderPve,
+  guest: renderGuest,
   settings: renderSettings,
 };
 
@@ -170,10 +172,10 @@ function route() {
   const view = ROUTES[name] || renderDashboard;
   $$('.nav-item').forEach((n) => {
     const target = n.getAttribute('href').slice(2);
-    n.classList.toggle('active', !n.hasAttribute('data-updpill') && (target === name || (name === 'client' && target === 'clients')));
+    n.classList.toggle('active', !n.hasAttribute('data-updpill') && (target === name || (name === 'client' && target === 'clients') || (name === 'guest' && target === 'proxmox')));
   });
   const crumb = $('[data-crumb]');
-  if (crumb) crumb.textContent = name === 'client' ? `Clients / ${api.agents.get(params[0])?.name || ''}` : (NAV.find((n) => n.href === `#/${name}`) || NAV[0]).label;
+  if (crumb) crumb.textContent = name === 'client' ? `Clients / ${api.agents.get(params[0])?.name || ''}` : name === 'guest' ? `Proxmox / ${api.agents.get(params[0])?.name || ''}` : (NAV.find((n) => n.href === `#/${name}`) || NAV[0]).label;
   cleanup?.();
   const page = $('#page');
   page.scrollTop = 0;

@@ -493,6 +493,7 @@ app.post('/api/agents/:id/pve/power', requireAdmin, wrap(async (req, res) => {
 const PVE_CALLS = {
   'pve.config.get': { guest: true },
   'pve.config.set': { guest: true, audit: 'Proxmox: Einstellungen geändert', detail: (p) => Object.keys(p.changes || {}).join(', ') },
+  'pve.rrd': { guest: true },
   'pve.snap.list': { guest: true },
   'pve.snap': { guest: true, timeout: 45000, audit: (p) => ({ create: 'Proxmox: Snapshot angelegt', rollback: 'Proxmox: Snapshot zurückgerollt', delete: 'Proxmox: Snapshot gelöscht' })[p.op], detail: (p) => p.snapname },
   'pve.backup.info': { guest: true, timeout: 60000 },

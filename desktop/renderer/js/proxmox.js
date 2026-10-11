@@ -5,7 +5,7 @@ import { api, LS } from './api.js';
 import { icon, esc, el, $, $$, modal, toast, confirmDialog, fmtBytes, fmtDuration, level, tagHtml, osShort } from './ui.js';
 import { RemoteTerminal } from './terminal.js';
 
-const kind = (type) => (type === 'lxc' ? 'Container' : 'VM');
+export const kind = (type) => (type === 'lxc' ? 'Container' : 'VM');
 const OPS = {
   start: { label: 'Starten', icon: 'play', done: 'wird gestartet' },
   shutdown: { label: 'Herunterfahren', icon: 'power', done: 'wird heruntergefahren', confirm: 'Das Gastsystem wird sauber heruntergefahren.' },
@@ -334,20 +334,20 @@ export async function assignDialog(agent) {
 }
 
 // Betriebssystem laut Proxmox-Konfiguration (ostype)
-const OSTYPES = {
+export const OSTYPES = {
   l26: 'Linux', l24: 'Linux 2.4', win11: 'Windows 11', win10: 'Windows 10', win8: 'Windows 8', win7: 'Windows 7', wvista: 'Windows Vista',
   wxp: 'Windows XP', w2k: 'Windows 2000', w2k3: 'Windows 2003', w2k8: 'Windows 2008', solaris: 'Solaris', other: 'Andere',
   debian: 'Debian', ubuntu: 'Ubuntu', alpine: 'Alpine', centos: 'CentOS', fedora: 'Fedora', archlinux: 'Arch Linux',
   opensuse: 'openSUSE', gentoo: 'Gentoo', nixos: 'NixOS', devuan: 'Devuan', unmanaged: '',
 };
 
-function miniBar(pct, kind = '', threshold = 90) {
+export function miniBar(pct, kind = '', threshold = 90) {
   if (pct == null || !isFinite(pct)) return '<span class="muted">–</span>';
   const text = pct < 10 ? pct.toFixed(1).replace('.', ',') : Math.round(pct);
   return `<span class="mini-meter"><span class="meter-track"><span class="meter-fill ${kind} ${level(pct, threshold)}" style="display:block;width:${Math.min(100, pct)}%"></span></span><span>${text}%</span></span>`;
 }
 
-const statusBadge = (s) => (s === 'running'
+export const statusBadge = (s) => (s === 'running'
   ? `<span class="badge good">läuft</span>`
   : s === 'stopped' ? `<span class="badge">aus</span>` : `<span class="badge warning">${esc(s || '?')}</span>`);
 
@@ -412,7 +412,7 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
       return `<tr data-g="${g.hostId}:${g.type}:${g.vmid}" class="pve-row">
         <td class="num">${g.vmid}</td>
         <td class="pve-name-cell" ${g.description ? `title="${esc(g.description)}"` : ''}>
-          <div class="n">${esc(g.name)}</div>
+          <a class="n pve-open" data-k="settings" title="Details öffnen">${esc(g.name)}</a>
           ${g.tags?.length ? `<div class="sub">${g.tags.map((x) => tagHtml(x, { small: true })).join('')}</div>` : g.description ? `<div class="sub muted">${esc(g.description)}</div>` : ''}
         </td>
         ${multi ? `<td class="pve-host-cell">${esc(g.hostName)}</td>` : ''}
@@ -428,7 +428,7 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
           ${run && !a.online ? `<div><button class="btn sm ghost pve-fix" data-k="restart-agent" title="BOLZO-Agent im Gast neu starten">${icon('refresh', 'sm')}Agent neu starten</button></div>` : ''}` : '<span class="muted">–</span>'}</td>
         <td class="actions" style="white-space:nowrap">
           ${run ? `<button class="btn sm" data-k="console">${icon(g.type === 'lxc' ? 'terminal' : 'monitor', 'sm')}Konsole</button>` : `<button class="btn sm" data-k="start">${icon('play', 'sm')}Starten</button>`}
-          <button class="btn sm icon-only" data-k="settings" title="Einstellungen, Netzwerk, Snapshots, Backups">${icon('sliders', 'sm')}</button>
+          <button class="btn sm icon-only" data-k="settings" title="Details & Einstellungen">${icon('sliders', 'sm')}</button>
           <button class="btn sm icon-only" data-k="more" title="Weitere Aktionen">⋯</button>
         </td></tr>`;
     }).join('') || `<tr><td colspan="${cols}"><div class="empty">${q ? 'Kein Gast passt zum Filter' : 'Keine VMs oder Container'}</div></td></tr>`;
@@ -447,17 +447,17 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     if (b.dataset.k === 'console') return openConsole(g);
     if (b.dataset.k === 'start') return (await pvePower(g, 'start')) && setTimeout(load, 2500);
     if (b.dataset.k === 'restart-agent') return restartAgent(g, b);
-    if (b.dataset.k === 'settings') return guestSettingsDialog(g, load);
+    if (b.dataset.k === 'settings') { location.hash = `#/guest/${g.hostId}/${g.type}/${g.vmid}`; return; }
     const ops = g.status === 'running' ? ['shutdown', 'reboot', 'stop'] : ['start'];
     popupMenu(b, [
       ...ops.map((k) => ({ k, label: OPS[k].label, icon: OPS[k].icon, danger: k === 'stop' })),
       ...(g.status === 'running' ? [{ k: 'console', label: 'Konsole öffnen', icon: g.type === 'lxc' ? 'terminal' : 'monitor' }] : []),
       ...(g.status === 'running' && (g.type === 'lxc' || g.agentId) ? [{ k: 'restart-agent', label: 'BOLZO-Agent im Gast neu starten', icon: 'refresh' }] : []),
-      { k: 'settings', label: 'Einstellungen, Snapshots, Backups', icon: 'sliders' },
+      { k: 'settings', label: 'Details & Einstellungen', icon: 'sliders' },
     ], async (k) => {
       if (k === 'console') return openConsole(g);
       if (k === 'restart-agent') return restartAgent(g);
-      if (k === 'settings') return guestSettingsDialog(g, load);
+      if (k === 'settings') { location.hash = `#/guest/${g.hostId}/${g.type}/${g.vmid}`; return; }
       if (await pvePower(g, k)) setTimeout(load, 2500);
     });
   };
@@ -500,135 +500,16 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
 // =====================================================================
 // Verwaltung: Gast-Einstellungen, Snapshots, Backups, Host, Netzwerk
 // =====================================================================
-const pveCall = (hostId, action, params = {}) => api.post(`/api/agents/${hostId}/pve/call`, { action, params });
-const fmtDate = (ts) => (ts ? new Date(ts).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '–');
+export const pveCall = (hostId, action, params = {}) => api.post(`/api/agents/${hostId}/pve/call`, { action, params });
+export const fmtDate = (ts) => (ts ? new Date(ts).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '–');
 const bar = (used, total) => (total ? miniBar((100 * used) / total, '', 90) : '<span class="muted">–</span>');
 
-// ---------- Einstellungen eines Gastes ----------
-export async function guestSettingsDialog(g, onSaved = () => {}) {
-  const { el: back, close } = modal({
-    title: `${g.name || `${kind(g.type)} ${g.vmid}`} – Einstellungen`,
-    wide: true,
-    body: `<div class="seg" data-gtabs style="margin-bottom:16px">
-        <button data-t="general">${icon('sliders', 'sm')} Allgemein</button>
-        <button data-t="net">${icon('network', 'sm')} Netzwerk</button>
-        <button data-t="snap">${icon('clock', 'sm')} Snapshots</button>
-        <button data-t="backup">${icon('download', 'sm')} Backups</button>
-      </div>
-      <div data-gbody><div class="muted">Lade ...</div></div>`,
-  });
-  const body = $('[data-gbody]', back);
+// ---------- Snapshots und Backups eines Gastes (eingebettet in die Gast-Seite) ----------
+export async function renderGuestSnapshots(body, g) {
   const ref = { vmid: g.vmid, type: g.type, name: g.name };
-  let conf = null;
-  async function loadConf() {
-    conf = await pveCall(g.hostId, 'pve.config.get', ref);
-    return conf;
-  }
-  const views = { general, net, snap, backup };
-  async function show(t) {
-    $$('[data-t]', back).forEach((b) => b.classList.toggle('on', b.dataset.t === t));
-    body.innerHTML = '<div class="muted">Lade ...</div>';
-    try { await views[t](); } catch (e) { body.innerHTML = `<div class="err-text">${esc(e.message)}</div>`; }
-  }
-  $$('[data-t]', back).forEach((b) => (b.onclick = () => show(b.dataset.t)));
-
-  async function save(changes, btn) {
-    btn.disabled = true;
-    try {
-      const r = await pveCall(g.hostId, 'pve.config.set', { ...ref, changes });
-      if (!r.changed) toast('Keine Änderungen');
-      else if (r.pending?.length) toast(`Gespeichert – ${r.pending.join(', ')} wird beim nächsten Neustart des Gastes übernommen`);
-      else toast('Gespeichert');
-      onSaved();
-      await loadConf();
-    } catch (e) { toast(e.message, 'err'); }
-    btn.disabled = false;
-  }
-
-  async function general() {
-    const c = conf || (await loadConf());
-    const isVm = g.type === 'qemu';
-    body.innerHTML = `
-      ${c.pending?.length ? `<div class="pve-note">${icon('alert', 'sm')}Noch nicht aktiv (wird beim nächsten Neustart übernommen): ${esc(c.pending.join(', '))}</div>` : ''}
-      <div class="form-grid">
-        <div class="field"><label>Name</label><input class="input" data-f="name" value="${esc(c.name)}"></div>
-        <div class="field"><label>Tags (mit Komma getrennt)</label><input class="input" data-f="tags" value="${esc(c.tags.join(', '))}" placeholder="z.B. web, prod"></div>
-        <div class="field"><label>CPU-Kerne</label><input class="input" type="number" min="1" max="512" data-f="cores" value="${c.cores}"></div>
-        ${isVm ? `<div class="field"><label>CPU-Sockel</label><input class="input" type="number" min="1" max="16" data-f="sockets" value="${c.sockets}"></div>` : `<div class="field"><label>Swap (MB)</label><input class="input" type="number" min="0" step="128" data-f="swap" value="${c.swap}"></div>`}
-        <div class="field"><label>Arbeitsspeicher (MB)</label><input class="input" type="number" min="16" step="256" data-f="memory" value="${c.memory}"><div class="hint">${fmtBytes(c.memory * 1048576)}</div></div>
-        <div class="field"><label>Beim Booten des Hosts starten</label><label class="row" style="height:36px;gap:8px;cursor:pointer"><input type="checkbox" class="check" data-f="onboot" ${c.onboot ? 'checked' : ''}>Autostart</label></div>
-        <div class="field"><label>Startreihenfolge</label><input class="input" type="number" min="0" data-f="order" value="${esc(c.startup.order)}" placeholder="beliebig"><div class="hint">Kleinere Zahl startet zuerst</div></div>
-        <div class="field"><label>Wartezeit danach (s)</label><input class="input" type="number" min="0" data-f="up" value="${esc(c.startup.up)}" placeholder="0"><div class="hint">bevor der nächste Gast startet</div></div>
-        <div class="field" style="grid-column:1/-1"><label>Beschreibung / Notizen</label><textarea class="textarea" style="min-height:90px" data-f="description">${esc(c.description)}</textarea></div>
-      </div>
-      <div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" data-save>${icon('check', 'sm')}Speichern</button></div>`;
-    const v = (k) => $(`[data-f="${k}"]`, body);
-    $('[data-save]', body).onclick = (e) => {
-      const ch = {};
-      if (v('name').value.trim() !== c.name) ch.name = v('name').value.trim();
-      const tags = v('tags').value.split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
-      if (tags.join(';') !== c.tags.join(';')) ch.tags = tags;
-      if (Number(v('cores').value) !== c.cores) ch.cores = Number(v('cores').value);
-      if (isVm && Number(v('sockets').value) !== c.sockets) ch.sockets = Number(v('sockets').value);
-      if (!isVm && Number(v('swap').value) !== c.swap) ch.swap = Number(v('swap').value);
-      if (Number(v('memory').value) !== c.memory) ch.memory = Number(v('memory').value);
-      if (v('onboot').checked !== c.onboot) ch.onboot = v('onboot').checked;
-      const st = { order: v('order').value.trim(), up: v('up').value.trim(), down: c.startup.down };
-      if (st.order !== c.startup.order || st.up !== c.startup.up) ch.startup = st;
-      if (v('description').value !== c.description) ch.description = v('description').value;
-      save(ch, e.currentTarget);
-    };
-  }
-
-  async function net() {
-    const [c, nl] = await Promise.all([conf || loadConf(), pveCall(g.hostId, 'pve.net.list').catch(() => null)]);
-    const bridges = (nl?.ifaces || []).filter((i) => i.type === 'bridge' || i.type === 'OVSBridge');
-    const isCt = g.type === 'lxc';
-    if (!c.nets.length) { body.innerHTML = '<div class="empty">Keine Netzwerkkarte</div>'; return; }
-    body.innerHTML = c.nets.map((n) => {
-      const opts = bridges.some((b) => b.iface === n.bridge) ? bridges : [...bridges, { iface: n.bridge, comments: '' }];
-      const mode = !n.ip ? 'none' : n.ip === 'dhcp' ? 'dhcp' : n.ip === 'manual' ? 'manual' : 'static';
-      return `<div class="card card-pad pve-nic" data-key="${n.key}">
-        <div class="row" style="margin-bottom:12px;gap:10px"><b>${esc(n.key)}${n.name ? ` (${esc(n.name)})` : ''}</b><span class="muted mono" style="font-size:12px">${esc(n.model ? `${n.model} · ` : '')}${esc(n.mac)}</span></div>
-        <div class="form-grid">
-          <div class="field"><label>Brücke</label><select class="select" data-n="bridge">${opts.map((b) => `<option value="${esc(b.iface)}" ${b.iface === n.bridge ? 'selected' : ''}>${esc(b.iface)}${b.comments ? ` – ${esc(b.comments)}` : ''}${b.cidr ? ` (${esc(b.cidr)})` : ''}</option>`).join('')}</select></div>
-          <div class="field"><label>VLAN-Tag</label><input class="input" type="number" min="1" max="4094" data-n="tag" value="${esc(n.tag)}" placeholder="kein VLAN"></div>
-          <div class="field"><label>Firewall</label><label class="row" style="height:36px;gap:8px;cursor:pointer"><input type="checkbox" class="check" data-n="firewall" ${n.firewall ? 'checked' : ''}>Proxmox-Firewall für diese Karte</label></div>
-          ${isCt ? `
-          <div class="field"><label>IPv4</label><select class="select" data-n="mode"><option value="dhcp" ${mode === 'dhcp' ? 'selected' : ''}>DHCP</option><option value="static" ${mode === 'static' ? 'selected' : ''}>Statisch</option>${mode === 'manual' || mode === 'none' ? `<option value="${mode}" selected>${mode === 'manual' ? 'Manuell' : 'Nicht gesetzt'}</option>` : ''}</select></div>
-          <div class="field" data-static><label>IP/Netz</label><input class="input mono" data-n="ip" value="${mode === 'static' ? esc(n.ip) : ''}" placeholder="10.2.30.50/24"></div>
-          <div class="field" data-static><label>Gateway</label><input class="input mono" data-n="gw" value="${esc(n.gw)}" placeholder="10.2.30.1"></div>` : ''}
-        </div></div>`;
-    }).join('') + `<div class="hint" style="margin:8px 0 0">Änderungen an laufenden Gästen greifen sofort. Hängt die Verbindung des Gastes an dieser Karte, kann er kurz offline sein.</div>
-      <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn primary" data-save>${icon('check', 'sm')}Speichern</button></div>`;
-    const syncStatic = (card) => $$('[data-static]', card).forEach((f) => (f.style.display = $('[data-n="mode"]', card)?.value === 'static' ? '' : 'none'));
-    $$('.pve-nic', body).forEach((card) => {
-      syncStatic(card);
-      const m = $('[data-n="mode"]', card);
-      if (m) m.onchange = () => syncStatic(card);
-    });
-    $('[data-save]', body).onclick = (e) => {
-      const nets = [];
-      for (const card of $$('.pve-nic', body)) {
-        const n = c.nets.find((x) => x.key === card.dataset.key);
-        const q = (k) => $(`[data-n="${k}"]`, card);
-        const out = { key: n.key };
-        if (q('bridge').value !== n.bridge) out.bridge = q('bridge').value;
-        if (q('tag').value.trim() !== n.tag) out.tag = q('tag').value.trim();
-        if (q('firewall').checked !== n.firewall) out.firewall = q('firewall').checked;
-        if (isCt && q('mode')) {
-          const m = q('mode').value;
-          const ip = m === 'static' ? q('ip').value.trim() : m;
-          const gw = m === 'static' ? q('gw').value.trim() : '';
-          if (m !== 'none' && (ip !== n.ip || gw !== n.gw)) { out.ip = ip; out.gw = gw; }
-        }
-        if (Object.keys(out).length > 1) nets.push(out);
-      }
-      save(nets.length ? { nets } : {}, e.currentTarget);
-    };
-  }
-
-  async function snap() {
+  const show = () => renderGuestSnapshots(body, g);
+  body.innerHTML = '<div class="card empty">Lade ...</div>';
+  try {
     const r = await pveCall(g.hostId, 'pve.snap.list', ref);
     const d = new Date();
     const pad = (n) => String(n).padStart(2, '0');
@@ -651,7 +532,7 @@ export async function guestSettingsDialog(g, onSaved = () => {}) {
           <td style="white-space:nowrap;text-align:right"><button class="btn sm" data-sk="rollback">${icon('back', 'sm')}Zurückrollen</button> <button class="btn sm danger icon-only" data-sk="delete" title="Löschen">${icon('trash', 'sm')}</button></td></tr>`).join('')
         || '<tr><td colspan="5"><div class="empty">Noch keine Snapshots</div></td></tr>'}
       </tbody></table></div>`;
-    const after = (msg) => { toast(msg); setTimeout(() => show('snap'), 3000); };
+    const after = (msg) => { toast(msg); setTimeout(() => show(), 3000); };
     $('[data-screate]', body).onclick = async (e) => {
       const btn = e.currentTarget;
       btn.disabled = true;
@@ -672,9 +553,15 @@ export async function guestSettingsDialog(g, onSaved = () => {}) {
         after(rollback ? 'Wird zurückgerollt' : 'Snapshot wird gelöscht');
       } catch (err) { toast(err.message, 'err'); }
     }));
+    } catch (e) {
+    body.innerHTML = `<div class="card empty err-text">${esc(e.message)}</div>`;
   }
+}
 
-  async function backup() {
+export async function renderGuestBackups(body, g) {
+  const ref = { vmid: g.vmid, type: g.type, name: g.name };
+  body.innerHTML = '<div class="card empty">Lade ...</div>';
+  try {
     const r = await pveCall(g.hostId, 'pve.backup.info', ref);
     body.innerHTML = `
       <div class="card card-pad" style="margin-bottom:14px">
@@ -700,10 +587,9 @@ export async function guestSettingsDialog(g, onSaved = () => {}) {
         } catch (e) { toast(e.message, 'err'); run.disabled = false; }
       };
     }
+    } catch (e) {
+    body.innerHTML = `<div class="card empty err-text">${esc(e.message)}</div>`;
   }
-
-  show('general');
-  return close;
 }
 
 // ---------- Host-Bereich mit Reitern ----------

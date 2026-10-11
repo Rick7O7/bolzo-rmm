@@ -103,6 +103,7 @@ export function renderClient(root, { go, params }) {
       { k: 'rename', label: 'Umbenennen', icon: 'edit' },
       { k: 'folder', label: a.folderId && folderById(a.folderId) ? `Ordner: ${folderPath(a.folderId)}` : 'In Ordner verschieben', icon: 'folder' },
       ...(a.info?.proxmox ? [] : [{ k: 'pve', label: a.pve ? 'Proxmox-Zuordnung ändern' : 'Proxmox-VM zuordnen', icon: 'server' }]),
+      ...(a.pve ? [{ k: 'pve-page', label: 'Proxmox-Details öffnen', icon: 'server' }] : []),
       ...(a.pve && a.pve.hostOnline ? [
         { k: 'pve-reboot', label: 'Über Proxmox neu starten', icon: 'refresh' },
         { k: 'pve-stop', label: 'Über Proxmox ausschalten (hart)', icon: 'stop', danger: true },
@@ -127,6 +128,7 @@ export function renderClient(root, { go, params }) {
         if (k === 'rename') return rename();
         if (k === 'folder') return moveMenu(anchor, [a.id]);
         if (k === 'pve') return assignDialog(a);
+        if (k === 'pve-page') return go(`#/guest/${a.pve.hostId}/${a.pve.type}/${a.pve.vmid}`);
         if (k === 'pve-reboot') return pvePower(guestOf(a), 'reboot');
         if (k === 'pve-stop') return pvePower(guestOf(a), 'stop');
         if (k === 'update') {
