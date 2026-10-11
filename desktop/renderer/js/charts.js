@@ -47,7 +47,7 @@ export function lineChart(container, { height = 220 } = {}) {
     const { W, H, t0, t1, x, y } = geom();
     let g = '';
     for (const v of [0, 25, 50, 75, 100]) {
-      g += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v)}" y2="${y(v)}" stroke="${v === 0 ? 'var(--axis)' : 'var(--grid)'}" stroke-width="1"/>`;
+      g += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v)}" y2="${y(v)}" stroke="${v === 0 ? 'var(--axis)' : 'var(--grid)'}" stroke-width="1" ${v === 0 ? '' : 'stroke-dasharray="3 4"'}/>`;
       g += `<text x="${pad.l - 8}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)" class="num">${v}</text>`;
     }
     // Zeitachse: ca. 5 Beschriftungen
@@ -59,7 +59,8 @@ export function lineChart(container, { height = 220 } = {}) {
     for (const s of SERIES) {
       if (pts.length < 2) continue;
       const d = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p[0]).toFixed(1)},${y(p[s.key]).toFixed(1)}`).join('');
-      g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+      g += `<path d="${d}L${x(pts[pts.length - 1][0]).toFixed(1)},${y(0)}L${x(pts[0][0]).toFixed(1)},${y(0)}Z" fill="${s.color}" opacity="0.07"/>`;
+      g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/>`;
     }
     g += `<g class="hover" style="display:none"><line y1="${pad.t}" y2="${H - pad.b}" stroke="var(--text-2)" stroke-width="1" stroke-dasharray="3 3"/>${SERIES.map((s) => `<circle r="4.5" fill="${s.color}" stroke="var(--surface)" stroke-width="2" data-k="${s.key}"/>`).join('')}</g>`;
     g += `<rect x="${pad.l}" y="0" width="${Math.max(0, W - pad.l - pad.r)}" height="${H}" fill="transparent" class="hit"/>`;

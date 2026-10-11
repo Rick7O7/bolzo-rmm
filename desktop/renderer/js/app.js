@@ -1,5 +1,5 @@
 import { api, LS } from './api.js';
-import { icon, esc, $, $$ } from './ui.js';
+import { icon, esc, $, $$, primaryIp, isPveHost } from './ui.js';
 import { renderDashboard } from './views/dashboard.js';
 import { renderClients } from './views/clients.js';
 import { renderClient } from './views/client.js';
@@ -18,7 +18,8 @@ const NAV = [
   { href: '#/history', label: 'Verlauf', icon: 'clock' },
   { href: '#/settings', label: 'Einstellungen', icon: 'sliders', bottom: true }, // unten über der Verbindungsanzeige
 ];
-const navItem = (n) => `<a class="nav-item" href="${n.href}" style="text-decoration:none">${icon(n.icon)}${n.label}${n.href === '#/clients' ? '<span class="badge" data-online></span>' : ''}${n.href === '#/proxmox' ? '<span class="badge" data-pvecount hidden></span>' : ''}</a>`;
+// Symbol-Leiste: nur Icons, Name als Tooltip; kleine Zähler für Probleme
+const navItem = (n) => `<a class="nav-item" href="${n.href}" data-tip="${n.label}">${icon(n.icon)}${n.href === '#/clients' ? '<span class="nav-count" data-problems hidden></span>' : ''}</a>`;
 const ROUTES = {
   dashboard: renderDashboard,
   clients: renderClients,
@@ -69,42 +70,88 @@ function showLogin(error = '') {
 function showShell() {
   app.innerHTML = `
     <div class="shell">
-      <aside class="sidebar">
-        <div class="brand"><img class="brand-mark" src="../build/icon.png" alt=""><span class="wordmark">BOLZO <span>RMM</span></span></div>
-        <nav class="nav">${NAV.filter((n) => !n.bottom).map(navItem).join('')}</nav>
-        <div class="sidebar-foot">
-          <a class="update-pill" href="#/settings" data-updpill hidden>${icon('download', 'sm')}<span></span></a>
-          <nav class="nav nav-bottom">${NAV.filter((n) => n.bottom).map(navItem).join('')}</nav>
-          <div class="conn"><span class="dot" data-conndot></span><div style="min-width:0"><div data-connlabel>Verbinde ...</div><div class="host">${esc(api.server.replace(/^https?:\/\//, ''))}</div></div></div>
-        </div>
-      </aside>
+      <nav class="rail">
+        <a class="rail-logo" href="#/dashboard" data-tip="BOLZO RMM"><img src="../build/icon.png" alt=""></a>
+        ${NAV.filter((n) => !n.bottom).map(navItem).join('')}
+        <span class="rail-grow"></span>
+        <a class="nav-item update" href="#/settings" data-updpill data-tip="Update verfügbar" hidden>${icon('download')}<span class="nav-dot"></span></a>
+        ${NAV.filter((n) => n.bottom).map(navItem).join('')}
+      </nav>
       <main class="main">
-        <div class="topbar"></div>
+        <header class="topbar">
+          <div class="crumbs"><span class="root">BOLZO RMM</span><span class="sep">/</span><span data-crumb></span></div>
+          <span class="grow"></span>
+          <div class="gsearch">
+            ${icon('search', 'sm')}<input data-gsearch placeholder="Clients, IPs, Tags suchen" spellcheck="false"><kbd>Strg K</kbd>
+            <div class="gsearch-results" data-gresults hidden></div>
+          </div>
+          <span class="conn-pill" data-conn title="${esc(api.server.replace(/^https?:\/\//, ''))}"><span class="dot" data-conndot></span><span data-connlabel>Verbinde ...</span></span>
+        </header>
         <div class="page" id="page"></div>
       </main>
     </div>`;
+  initSearch();
 }
+
+// Globale Suche: Clients nach Name, IP, Tag, Betriebssystem; Enter öffnet den ersten Treffer
+function initSearch() {
+  const input = $('[data-gsearch]');
+  const box = $('[data-gresults]');
+  let hits = [];
+  let sel = 0;
+  const draw = () => {
+    const q = input.value.trim().toLowerCase();
+    if (!q) { box.hidden = true; return; }
+    hits = [...api.agents.values()].filter((a) => [a.name, a.hostname, primaryIp(a), a.os, a.publicIp, a.pve?.hostName, isPveHost(a) ? 'proxmox' : '', ...(a.tags || [])]
+      .join(' ').toLowerCase().includes(q)).sort((a, b) => b.online - a.online || a.name.localeCompare(b.name)).slice(0, 8);
+    sel = Math.min(sel, Math.max(0, hits.length - 1));
+    box.hidden = false;
+    box.innerHTML = hits.length ? hits.map((a, i) => `<div class="gs-item ${i === sel ? 'on' : ''}" data-id="${a.id}">
+        <span class="dot ${a.online ? 'online' : 'offline'}"></span><span class="n">${esc(a.name)}</span><span class="s">${esc(primaryIp(a))}</span></div>`).join('')
+      : '<div class="gs-empty">Keine Treffer</div>';
+  };
+  const open = (a) => { if (!a) return; input.value = ''; box.hidden = true; input.blur(); go(`#/client/${a.id}`); };
+  input.addEventListener('input', () => { sel = 0; draw(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { sel = Math.min(sel + 1, hits.length - 1); draw(); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { sel = Math.max(sel - 1, 0); draw(); e.preventDefault(); }
+    else if (e.key === 'Enter') open(hits[sel]);
+    else if (e.key === 'Escape') { input.value = ''; box.hidden = true; input.blur(); }
+  });
+  input.addEventListener('blur', () => setTimeout(() => (box.hidden = true), 150));
+  input.addEventListener('focus', draw);
+  box.addEventListener('mousedown', (e) => {
+    const it = e.target.closest('[data-id]');
+    if (it) open(api.agents.get(it.dataset.id));
+  });
+}
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    const input = $('[data-gsearch]');
+    if (input) { e.preventDefault(); input.focus(); input.select(); }
+  }
+});
 
 function updateConn() {
   const dot = $('[data-conndot]');
   if (!dot) return;
   dot.className = `dot ${api.connected ? 'online' : 'offline'}`;
   $('[data-connlabel]').textContent = api.connected ? 'Verbunden' : 'Getrennt – verbinde neu';
-}
-function updateBadge() {
-  const b = $('[data-online]');
-  if (!b) return;
-  const all = [...api.agents.values()];
-  b.textContent = `${all.filter((a) => a.online).length}/${all.length}`;
-  const p = $('[data-pvecount]');
-  const hosts = all.filter((a) => a.info?.proxmox);
-  if (p) {
-    p.hidden = !hosts.length;
-    p.textContent = `${hosts.filter((a) => a.online).length}/${hosts.length}`;
-  }
+  $('[data-conn]').classList.toggle('bad', !api.connected);
 }
 
-// Hinweis unten in der Seitenleiste, sobald irgendein Update bereitsteht
+// Zähler an "Clients": Rechner, die offline sind oder eine Warnung haben
+function updateBadge() {
+  const b = $('[data-problems]');
+  if (!b) return;
+  const all = [...api.agents.values()];
+  const n = all.filter((a) => !a.online || a.alerts?.length).length;
+  b.hidden = !n;
+  b.textContent = n;
+  b.closest('.nav-item').dataset.tip = `Clients · ${all.filter((a) => a.online).length} von ${all.length} online`;
+}
+
+// Hinweis in der Leiste, sobald irgendein Update bereitsteht
 function updatePill() {
   const pill = $('[data-updpill]');
   if (!pill) return;
@@ -113,7 +160,7 @@ function updatePill() {
   if (updates.server?.updateAvailable) parts.push('Server');
   if (updates.server?.agent?.outdatedOnline) parts.push('Agents');
   pill.hidden = !parts.length;
-  $('span', pill).textContent = `Update verfügbar: ${parts.join(', ')}`;
+  pill.dataset.tip = `Update verfügbar: ${parts.join(', ')}`;
 }
 updates.on(updatePill);
 
@@ -123,8 +170,10 @@ function route() {
   const view = ROUTES[name] || renderDashboard;
   $$('.nav-item').forEach((n) => {
     const target = n.getAttribute('href').slice(2);
-    n.classList.toggle('active', target === name || (name === 'client' && target === 'clients'));
+    n.classList.toggle('active', !n.hasAttribute('data-updpill') && (target === name || (name === 'client' && target === 'clients')));
   });
+  const crumb = $('[data-crumb]');
+  if (crumb) crumb.textContent = name === 'client' ? `Clients / ${api.agents.get(params[0])?.name || ''}` : (NAV.find((n) => n.href === `#/${name}`) || NAV[0]).label;
   cleanup?.();
   const page = $('#page');
   page.scrollTop = 0;

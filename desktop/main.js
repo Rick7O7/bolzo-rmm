@@ -15,10 +15,10 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 640,
     title: 'BOLZO RMM',
-    backgroundColor: '#0e0f11',
+    backgroundColor: '#111214',
     icon: path.join(__dirname, 'build', 'icon.png'),
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#0e0f11', symbolColor: '#c3c2b7', height: 44 },
+    titleBarOverlay: { color: '#111214', symbolColor: '#b9bcc3', height: 48 },
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

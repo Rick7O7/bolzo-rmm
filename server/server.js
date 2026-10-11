@@ -286,6 +286,20 @@ app.get('/api/agents/:id', requireScope('status'), wrap(async (req, res) => {
   res.json({ ...summarize(a), history: live.get(a.id)?.history || [] });
 }));
 
+// Durchschnittliche Auslastung aller Online-Clients je Minute (letzte Stunde) – fürs Dashboard
+app.get('/api/stats/history', requireAdmin, (req, res) => {
+  const buckets = new Map();
+  for (const id of conns.keys()) {
+    for (const [ts, cpu, mem] of live.get(id)?.history || []) {
+      const m = Math.floor(ts / 60e3) * 60e3;
+      const b = buckets.get(m) || { cpu: 0, mem: 0, n: 0 };
+      b.cpu += cpu; b.mem += mem; b.n++;
+      buckets.set(m, b);
+    }
+  }
+  res.json([...buckets].sort((x, y) => x[0] - y[0]).map(([m, b]) => [m, Math.round((b.cpu / b.n) * 10) / 10, Math.round((b.mem / b.n) * 10) / 10]));
+});
+
 app.patch('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
   const a = getAgent(req);
   const { name, tags, notes, pve } = req.body || {};
