@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.3.1';
+const VERSION = '1.3.2';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -462,28 +462,89 @@ async function pvesh(method, apiPath, args = [], timeout = 60000) {
   try { return JSON.parse(r.stdout || 'null'); } catch { return r.stdout.trim(); }
 }
 
-// MAC-Adressen aus der Gast-Konfiguration (für die automatische Zuordnung)
-function guestMacs(type, vmid) {
-  const conf = readFile(`/etc/pve/nodes/${pveNode()}/${PVE_TYPES[type]}/${vmid}.conf`).split(/^\[/m)[0]; // ohne Snapshots
-  return [...conf.matchAll(/^net\d+:.*?=([0-9a-f]{2}(?::[0-9a-f]{2}){5})/gim)].map((m) => m[1].toLowerCase());
+// Proxmox speichert die Beschreibung URL-kodiert in #-Zeilen
+function decodeDesc(raw) {
+  let t = raw;
+  try { t = decodeURIComponent(raw); } catch {}
+  return t.split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 120) || '';
+}
+
+// Gast-Konfiguration lesen (nur der aktuelle Stand, ohne Snapshot-Abschnitte); MACs für die automatische Zuordnung
+function guestConf(type, vmid) {
+  const text = readFile(`/etc/pve/nodes/${pveNode()}/${PVE_TYPES[type]}/${vmid}.conf`).split(/^\[/m)[0];
+  const get = (key) => (text.match(new RegExp(`^${key}:\\s*(.+)$`, 'm')) || [])[1]?.trim() || '';
+  const nets = [...text.matchAll(/^net\d+:\s*(.+)$/gm)].map((m) => m[1]);
+  return {
+    macs: nets.map((n) => (n.match(/=([0-9a-f]{2}(?::[0-9a-f]{2}){5})/i) || [])[1]?.toLowerCase()).filter(Boolean),
+    staticIps: nets.map((n) => (n.match(/(?:^|,)ip=(\d+\.\d+\.\d+\.\d+)/) || [])[1]).filter(Boolean),
+    onboot: get('onboot') === '1',
+    ostype: get('ostype'),
+    cores: Number(get('cores')) || 0,
+    description: decodeDesc([...text.matchAll(/^#(.*)$/gm)].map((m) => m[1]).join('\n')),
+  };
+}
+
+// IP-Adressen der Gäste: feste aus der Konfiguration, laufende Container per lxc-info,
+// sonst über die Nachbartabelle des Hosts (MAC -> IP)
+async function guestIps(guests) {
+  const neigh = new Map();
+  try {
+    for (const n of JSON.parse((await exec('ip', ['-j', 'neigh'])).stdout || '[]')) {
+      if (n.lladdr && /^\d+\.\d+\.\d+\.\d+$/.test(n.dst) && n.state?.[0] !== 'FAILED') neigh.set(n.lladdr.toLowerCase(), n.dst);
+    }
+  } catch {}
+  await Promise.all(guests.map(async (g) => {
+    const ips = new Set(g.conf.staticIps);
+    if (g.type === 'lxc' && g.status === 'running') {
+      const r = await exec('lxc-info', ['-n', String(g.vmid), '-iH'], { timeout: 5000 });
+      for (const ip of r.stdout.split(/\s+/)) if (/^\d+\.\d+\.\d+\.\d+$/.test(ip) && !ip.startsWith('127.')) ips.add(ip);
+    }
+    for (const mac of g.conf.macs) if (neigh.has(mac)) ips.add(neigh.get(mac));
+    g.ips = [...ips];
+  }));
 }
 
 async function pveGuests() {
   if (TEST_PVE) {
     const mac = (interfaces()[0]?.mac || '').toLowerCase();
     return { node: 'test', guests: [
-      { vmid: 101, type: 'qemu', name: 'test-vm', status: 'running', template: false, cpu: 0.12, cpus: 2, mem: 1.2e9, maxmem: 4e9, uptime: 7300, macs: [mac] },
-      { vmid: 102, type: 'lxc', name: 'test-ct', status: 'stopped', template: false, cpu: 0, cpus: 1, mem: 0, maxmem: 1e9, uptime: 0, macs: [] },
+      { vmid: 101, type: 'qemu', name: 'test-vm', status: 'running', template: false, cpu: 0.0123, cpus: 2, mem: 1.2e9, maxmem: 4e9, disk: 0, maxdisk: 32e9, netin: 5.2e9, netout: 1.1e9, uptime: 7300, tags: ['web', 'prod'], onboot: true, ostype: 'win11', ips: ['10.2.30.51'], macs: [mac] },
+      { vmid: 102, type: 'lxc', name: 'test-ct', status: 'stopped', template: false, cpu: 0, cpus: 1, mem: 0, maxmem: 1e9, disk: 1.4e9, maxdisk: 8e9, netin: 0, netout: 0, uptime: 0, tags: [], onboot: false, ostype: 'debian', ips: ['10.2.30.52'], macs: [] },
     ] };
   }
   const node = pveNode();
-  const [vms, cts] = await Promise.all([pvesh('get', `/nodes/${node}/qemu`), pvesh('get', `/nodes/${node}/lxc`)]);
-  const map = (type) => (g) => ({
-    vmid: Number(g.vmid), type, name: g.name || '', status: g.status || '', template: !!g.template,
-    cpu: g.cpu || 0, cpus: g.cpus || g.maxcpu || 0, mem: g.mem || 0, maxmem: g.maxmem || 0, uptime: g.uptime || 0,
-    macs: guestMacs(type, g.vmid),
+  // Ein Aufruf liefert alles Wichtige für alle Gäste (pvesh ist Perl und startet langsam)
+  const res = (await pvesh('get', '/cluster/resources', ['--type', 'vm'])) || [];
+  const guests = res.filter((g) => g.node === node && (g.type === 'qemu' || g.type === 'lxc')).map((g) => {
+    const conf = guestConf(g.type, g.vmid);
+    return {
+      vmid: Number(g.vmid), type: g.type, name: g.name || '', status: g.status || '', template: !!g.template,
+      cpu: g.cpu || 0, cpus: g.maxcpu || conf.cores || 0, mem: g.mem || 0, maxmem: g.maxmem || 0,
+      disk: g.disk || 0, maxdisk: g.maxdisk || 0, netin: g.netin || 0, netout: g.netout || 0, uptime: g.uptime || 0,
+      tags: String(g.tags || '').split(/[;,\s]+/).filter(Boolean), lock: g.lock || '', hastate: g.hastate || '',
+      onboot: conf.onboot, ostype: conf.ostype, description: conf.description, macs: conf.macs, conf,
+    };
   });
-  return { node, guests: [...(vms || []).map(map('qemu')), ...(cts || []).map(map('lxc'))].sort((a, b) => a.vmid - b.vmid) };
+  await guestIps(guests);
+  for (const g of guests) delete g.conf;
+  return { node, guests: guests.sort((a, b) => a.vmid - b.vmid) };
+}
+
+// BOLZO-Agent in einem Gast neu starten (z.B. wenn er hängt) – Container per pct exec,
+// Linux-VMs über den QEMU-Gast-Agent
+async function pveRestartAgent(p) {
+  const { vmid, type } = checkGuest(p);
+  if (TEST_PVE) return { ok: true, test: true };
+  const cmd = ['systemctl', 'restart', 'bolzo-rmm-agent'];
+  const [c, a] = type === 'lxc'
+    ? outside('pct', ['exec', String(vmid), '--', ...cmd])
+    : outside('qm', ['guest', 'exec', String(vmid), '--', ...cmd]);
+  const r = await exec(c, a, { timeout: 45000 });
+  if (r.code !== 0) {
+    const msg = (r.stderr || r.stdout).trim().split('\n').pop() || `Fehler (${r.code})`;
+    throw new Error(type === 'qemu' && /agent/i.test(msg) ? 'Kein QEMU-Gast-Agent in der VM – Agent bitte dort selbst neu starten' : msg);
+  }
+  return { ok: true };
 }
 
 // Starten/Herunterfahren können lange dauern: kurz auf Fehler warten, dann im Hintergrund weiterlaufen lassen
@@ -694,6 +755,7 @@ const actions = {
   'shell.open': openShell,
   'pve.guests': pveGuests,
   'pve.power': pvePower,
+  'pve.restartAgent': pveRestartAgent,
   'vnc.open': vncOpen,
   'tunnel.close': ({ sid }) => { tunnels.get(sid)?.close(); return { ok: true }; },
 };

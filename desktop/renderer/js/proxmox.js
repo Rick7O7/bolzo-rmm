@@ -2,7 +2,7 @@
 // und die Konsole öffnen – VMs als Bildschirm (noVNC), Container als echtes Terminal.
 import RFB from '../../node_modules/@novnc/novnc/core/rfb.js';
 import { api, LS } from './api.js';
-import { icon, esc, el, $, $$, modal, toast, confirmDialog, fmtBytes, fmtDuration } from './ui.js';
+import { icon, esc, el, $, $$, modal, toast, confirmDialog, fmtBytes, fmtDuration, level, tagHtml, osShort } from './ui.js';
 import { RemoteTerminal } from './terminal.js';
 
 const kind = (type) => (type === 'lxc' ? 'Container' : 'VM');
@@ -333,6 +333,20 @@ export async function assignDialog(agent) {
   load();
 }
 
+// Betriebssystem laut Proxmox-Konfiguration (ostype)
+const OSTYPES = {
+  l26: 'Linux', l24: 'Linux 2.4', win11: 'Windows 11', win10: 'Windows 10', win8: 'Windows 8', win7: 'Windows 7', wvista: 'Windows Vista',
+  wxp: 'Windows XP', w2k: 'Windows 2000', w2k3: 'Windows 2003', w2k8: 'Windows 2008', solaris: 'Solaris', other: 'Andere',
+  debian: 'Debian', ubuntu: 'Ubuntu', alpine: 'Alpine', centos: 'CentOS', fedora: 'Fedora', archlinux: 'Arch Linux',
+  opensuse: 'openSUSE', gentoo: 'Gentoo', nixos: 'NixOS', devuan: 'Devuan', unmanaged: '',
+};
+
+function miniBar(pct, kind = '', threshold = 90) {
+  if (pct == null || !isFinite(pct)) return '<span class="muted">–</span>';
+  const text = pct < 10 ? pct.toFixed(1).replace('.', ',') : Math.round(pct);
+  return `<span class="mini-meter"><span class="meter-track"><span class="meter-fill ${kind} ${level(pct, threshold)}" style="display:block;width:${Math.min(100, pct)}%"></span></span><span>${text}%</span></span>`;
+}
+
 const statusBadge = (s) => (s === 'running'
   ? `<span class="badge good">läuft</span>`
   : s === 'stopped' ? `<span class="badge">aus</span>` : `<span class="badge warning">${esc(s || '?')}</span>`);
@@ -348,8 +362,8 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
       <button class="btn" data-refresh>${icon('refresh', 'sm')}Aktualisieren</button>
     </div>
     <div class="card table-wrap"><table class="tbl"><thead><tr>
-      <th>ID</th><th>Name</th><th>Typ</th><th>Status</th><th class="r">CPU</th><th class="r">RAM</th><th>Laufzeit</th><th>BOLZO-Client</th><th></th>
-    </tr></thead><tbody><tr><td colspan="9"><div class="empty">Lade ...</div></td></tr></tbody></table></div>`;
+      <th>ID</th><th>Name</th><th>Typ</th><th>Status</th><th>IP-Adresse</th><th>CPU</th><th>RAM</th><th>Disk</th><th>Netzwerk</th><th>Laufzeit</th><th>BOLZO-Client</th><th></th>
+    </tr></thead><tbody><tr><td colspan="12"><div class="empty">Lade ...</div></td></tr></tbody></table></div>`;
   const p = host().info.proxmox;
   $('[data-ver]', body).textContent = compact ? '' : `Proxmox VE ${p.version || ''} · Knoten ${p.node}`;
   let guests = [];
@@ -357,32 +371,43 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
 
   async function load() {
     if (!host()?.online) {
-      $('tbody', body).innerHTML = `<tr><td colspan="9"><div class="empty">${icon('server')}<h3>Host ist offline</h3></div></td></tr>`;
+      $('tbody', body).innerHTML = `<tr><td colspan="12"><div class="empty">${icon('server')}<h3>Host ist offline</h3></div></td></tr>`;
       return;
     }
     try {
       ({ guests } = await api.get(`/api/agents/${hostId}/pve/guests`));
     } catch (e) {
-      $('tbody', body).innerHTML = `<tr><td colspan="9"><div class="empty err-text">${esc(e.message)}</div></td></tr>`;
+      $('tbody', body).innerHTML = `<tr><td colspan="12"><div class="empty err-text">${esc(e.message)}</div></td></tr>`;
       return;
     }
+    const t = api.settings.thresholds;
     $('tbody', body).innerHTML = guests.filter((g) => !g.template).map((g) => {
       const a = g.agentId && api.agents.get(g.agentId);
       const run = g.status === 'running';
-      return `<tr data-g="${g.type}:${g.vmid}">
+      const osText = a ? osShort(a) : OSTYPES[g.ostype] ?? g.ostype ?? '';
+      const memPct = g.maxmem ? (100 * g.mem) / g.maxmem : null;
+      const diskPct = g.type === 'lxc' && g.maxdisk ? (100 * g.disk) / g.maxdisk : null; // VMs melden keine Belegung
+      return `<tr data-g="${g.type}:${g.vmid}" class="pve-row">
         <td class="num">${g.vmid}</td>
-        <td style="font-weight:500">${esc(g.name)}</td>
-        <td class="muted">${kind(g.type)}</td>
-        <td>${statusBadge(g.status)}</td>
-        <td class="r num">${run ? `${Math.round(g.cpu * 100)} %` : '–'}</td>
-        <td class="r num">${run ? `${fmtBytes(g.mem)} / ${fmtBytes(g.maxmem)}` : fmtBytes(g.maxmem)}</td>
+        <td class="pve-name-cell" ${g.description ? `title="${esc(g.description)}"` : ''}>
+          <div class="n">${esc(g.name)}</div>
+          ${g.tags?.length ? `<div class="sub">${g.tags.map((x) => tagHtml(x, { small: true })).join('')}</div>` : g.description ? `<div class="sub muted">${esc(g.description)}</div>` : ''}
+        </td>
+        <td><div>${kind(g.type)}</div>${osText ? `<div class="sub muted">${esc(osText)}</div>` : ''}</td>
+        <td><div>${statusBadge(g.status)}</div><div class="sub muted">${[g.onboot ? 'Autostart' : '', g.lock ? `gesperrt: ${esc(g.lock)}` : ''].filter(Boolean).join(' · ')}</div></td>
+        <td class="mono pve-ips">${g.ips?.length ? g.ips.map((ip) => `<div>${esc(ip)}</div>`).join('') : '<span class="muted">–</span>'}</td>
+        <td><div>${run ? miniBar(g.cpu * 100, '', t.cpu) : '<span class="muted">–</span>'}</div><div class="sub muted">${g.cpus ? `${g.cpus} ${g.cpus === 1 ? 'Kern' : 'Kerne'}` : ''}</div></td>
+        <td><div>${run ? miniBar(memPct, 'mem', t.mem) : '<span class="muted">–</span>'}</div><div class="sub muted num">${run ? `${fmtBytes(g.mem)} / ` : ''}${fmtBytes(g.maxmem)}</div></td>
+        <td><div>${diskPct != null ? miniBar(diskPct, '', t.disk) : '<span class="muted">–</span>'}</div><div class="sub muted num">${diskPct != null ? `${fmtBytes(g.disk)} / ` : ''}${g.maxdisk ? fmtBytes(g.maxdisk) : ''}</div></td>
+        <td class="num pve-net">${run ? `<div title="Empfangen seit dem Start">↓ ${fmtBytes(g.netin)}</div><div title="Gesendet seit dem Start">↑ ${fmtBytes(g.netout)}</div>` : '<span class="muted">–</span>'}</td>
         <td class="muted">${run ? fmtDuration(g.uptime) : '–'}</td>
-        <td>${a ? `<a href="#/client/${a.id}" class="link-client"><span class="dot ${a.online ? 'online' : 'offline'}"></span>${esc(a.name)}</a>` : '<span class="muted">–</span>'}</td>
+        <td>${a ? `<a href="#/client/${a.id}" class="link-client"><span class="dot ${a.online ? 'online' : 'offline'}"></span>${esc(a.name)}</a>
+          ${run && !a.online ? `<div><button class="btn sm ghost pve-fix" data-k="restart-agent" title="BOLZO-Agent im Gast neu starten">${icon('refresh', 'sm')}Agent neu starten</button></div>` : ''}` : '<span class="muted">–</span>'}</td>
         <td class="actions" style="white-space:nowrap">
           ${run ? `<button class="btn sm" data-k="console">${icon(g.type === 'lxc' ? 'terminal' : 'monitor', 'sm')}Konsole</button>` : `<button class="btn sm" data-k="start">${icon('play', 'sm')}Starten</button>`}
           <button class="btn sm icon-only" data-k="more" title="Weitere Aktionen">⋯</button>
         </td></tr>`;
-    }).join('') || `<tr><td colspan="9"><div class="empty">Keine VMs oder Container</div></td></tr>`;
+    }).join('') || `<tr><td colspan="12"><div class="empty">Keine VMs oder Container</div></td></tr>`;
   }
 
   const guestOf = (tr) => {
@@ -396,15 +421,30 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     const g = guestOf(b.closest('tr'));
     if (b.dataset.k === 'console') return openConsole(g);
     if (b.dataset.k === 'start') return (await pvePower(g, 'start')) && setTimeout(load, 2500);
+    if (b.dataset.k === 'restart-agent') return restartAgent(g, b);
     const ops = g.status === 'running' ? ['shutdown', 'reboot', 'stop'] : ['start'];
     popupMenu(b, [
       ...ops.map((k) => ({ k, label: OPS[k].label, icon: OPS[k].icon, danger: k === 'stop' })),
       ...(g.status === 'running' ? [{ k: 'console', label: 'Konsole öffnen', icon: g.type === 'lxc' ? 'terminal' : 'monitor' }] : []),
+      ...(g.status === 'running' && (g.type === 'lxc' || g.agentId) ? [{ k: 'restart-agent', label: 'BOLZO-Agent im Gast neu starten', icon: 'refresh' }] : []),
     ], async (k) => {
       if (k === 'console') return openConsole(g);
+      if (k === 'restart-agent') return restartAgent(g);
       if (await pvePower(g, k)) setTimeout(load, 2500);
     });
   };
+  async function restartAgent(g, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      await api.post(`/api/agents/${hostId}/pve/restart-agent`, { vmid: g.vmid, type: g.type, name: g.name });
+      toast(`BOLZO-Agent in ${g.name} wird neu gestartet`);
+      setTimeout(load, 5000);
+    } catch (e) {
+      toast(e.message, 'err');
+      if (btn) btn.disabled = false;
+    }
+  }
+
   $('[data-refresh]', body).onclick = load;
   $('[data-auto]', body).onclick = async () => {
     const free = guests.filter((g) => !g.agentId && !g.template);

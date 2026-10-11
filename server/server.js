@@ -473,6 +473,21 @@ app.post('/api/agents/:id/pve/power', requireAdmin, wrap(async (req, res) => {
   }
 }));
 
+// BOLZO-Agent im Gast neu starten (pct exec bzw. QEMU-Gast-Agent), z.B. wenn er hängt
+app.post('/api/agents/:id/pve/restart-agent', requireAdmin, wrap(async (req, res) => {
+  const h = pveHost(req);
+  const { vmid, type, name } = guestParams(req.body);
+  const what = guestAudit(h, vmid, type, name);
+  try {
+    const r = await agentRequest(h.id, 'pve.restartAgent', { vmid, type }, 60000);
+    auditReq(req, 'action', 'Agent im Gast neu gestartet', what);
+    res.json(r);
+  } catch (e) {
+    auditReq(req, 'action', 'Agent im Gast neu gestartet', { ...what, ok: false, result: e.message });
+    throw e;
+  }
+}));
+
 // VM-Bildschirm: Der Host-Agent öffnet einen Tunnel (/ws/tunnel) zum VNC der VM, die App
 // verbindet sich mit /ws/console. Der Server reicht die Daten unverändert durch.
 const tunnels = new Map(); // sid -> { hostId, agentWs, adminWs, toAdmin: [], toAgent: [], timer, audit }
