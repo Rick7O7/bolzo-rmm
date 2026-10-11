@@ -137,6 +137,13 @@ Herunterfahren, Neustart und hartes Ausschalten.
   - **Container:** echtes Terminal (`pct enter`). Kopieren und Einfügen gehen in beide Richtungen.
 - **Aufwecken** startet zugeordnete VMs und Container über Proxmox statt per Wake-on-LAN, auch über
   die Telefon-Sprachsteuerung.
+- **Einstellungen pro Gast** (⚙): Name, Kerne, RAM, Swap, Autostart/Startreihenfolge, Tags,
+  Beschreibung. Netzwerk: Brücke, VLAN, Firewall, bei Containern IP/Gateway. Dazu Snapshots
+  (anlegen, zurückrollen, löschen) und Backups (sofort starten, vorhandene ansehen).
+- **Host:** Speicher mit Belegung, Updates (prüfen, installieren, Host neu starten), Aufgaben-Liste
+  und **Netzwerk-Brücken** (anlegen, bearbeiten, löschen). Netzwerk-Änderungen werden gesammelt und
+  mit „Übernehmen“ aktiv. Ist der Server danach nicht erreichbar, stellt der Agent die alte
+  Konfiguration automatisch wieder her.
 
 Technisch: Der Host-Agent setzt per QEMU-Monitor ein Einmal-Passwort, das 60 s gilt. Dann verbindet er
 den VNC-Socket der VM über einen eigenen WebSocket (`/ws/tunnel`) mit dem Server, der die Daten

@@ -405,6 +405,7 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
           ${run && !a.online ? `<div><button class="btn sm ghost pve-fix" data-k="restart-agent" title="BOLZO-Agent im Gast neu starten">${icon('refresh', 'sm')}Agent neu starten</button></div>` : ''}` : '<span class="muted">–</span>'}</td>
         <td class="actions" style="white-space:nowrap">
           ${run ? `<button class="btn sm" data-k="console">${icon(g.type === 'lxc' ? 'terminal' : 'monitor', 'sm')}Konsole</button>` : `<button class="btn sm" data-k="start">${icon('play', 'sm')}Starten</button>`}
+          <button class="btn sm icon-only" data-k="settings" title="Einstellungen, Netzwerk, Snapshots, Backups">${icon('sliders', 'sm')}</button>
           <button class="btn sm icon-only" data-k="more" title="Weitere Aktionen">⋯</button>
         </td></tr>`;
     }).join('') || `<tr><td colspan="12"><div class="empty">Keine VMs oder Container</div></td></tr>`;
@@ -422,14 +423,17 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     if (b.dataset.k === 'console') return openConsole(g);
     if (b.dataset.k === 'start') return (await pvePower(g, 'start')) && setTimeout(load, 2500);
     if (b.dataset.k === 'restart-agent') return restartAgent(g, b);
+    if (b.dataset.k === 'settings') return guestSettingsDialog(g, load);
     const ops = g.status === 'running' ? ['shutdown', 'reboot', 'stop'] : ['start'];
     popupMenu(b, [
       ...ops.map((k) => ({ k, label: OPS[k].label, icon: OPS[k].icon, danger: k === 'stop' })),
       ...(g.status === 'running' ? [{ k: 'console', label: 'Konsole öffnen', icon: g.type === 'lxc' ? 'terminal' : 'monitor' }] : []),
       ...(g.status === 'running' && (g.type === 'lxc' || g.agentId) ? [{ k: 'restart-agent', label: 'BOLZO-Agent im Gast neu starten', icon: 'refresh' }] : []),
+      { k: 'settings', label: 'Einstellungen, Snapshots, Backups', icon: 'sliders' },
     ], async (k) => {
       if (k === 'console') return openConsole(g);
       if (k === 'restart-agent') return restartAgent(g);
+      if (k === 'settings') return guestSettingsDialog(g, load);
       if (await pvePower(g, k)) setTimeout(load, 2500);
     });
   };
@@ -467,4 +471,406 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
   load();
   timer = setInterval(load, 15000);
   return () => clearInterval(timer);
+}
+
+// =====================================================================
+// Verwaltung: Gast-Einstellungen, Snapshots, Backups, Host, Netzwerk
+// =====================================================================
+const pveCall = (hostId, action, params = {}) => api.post(`/api/agents/${hostId}/pve/call`, { action, params });
+const fmtDate = (ts) => (ts ? new Date(ts).toLocaleString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '–');
+const bar = (used, total) => (total ? miniBar((100 * used) / total, '', 90) : '<span class="muted">–</span>');
+
+// ---------- Einstellungen eines Gastes ----------
+export async function guestSettingsDialog(g, onSaved = () => {}) {
+  const { el: back, close } = modal({
+    title: `${g.name || `${kind(g.type)} ${g.vmid}`} – Einstellungen`,
+    wide: true,
+    body: `<div class="seg" data-gtabs style="margin-bottom:16px">
+        <button data-t="general">${icon('sliders', 'sm')} Allgemein</button>
+        <button data-t="net">${icon('network', 'sm')} Netzwerk</button>
+        <button data-t="snap">${icon('clock', 'sm')} Snapshots</button>
+        <button data-t="backup">${icon('download', 'sm')} Backups</button>
+      </div>
+      <div data-gbody><div class="muted">Lade ...</div></div>`,
+  });
+  const body = $('[data-gbody]', back);
+  const ref = { vmid: g.vmid, type: g.type, name: g.name };
+  let conf = null;
+  async function loadConf() {
+    conf = await pveCall(g.hostId, 'pve.config.get', ref);
+    return conf;
+  }
+  const views = { general, net, snap, backup };
+  async function show(t) {
+    $$('[data-t]', back).forEach((b) => b.classList.toggle('on', b.dataset.t === t));
+    body.innerHTML = '<div class="muted">Lade ...</div>';
+    try { await views[t](); } catch (e) { body.innerHTML = `<div class="err-text">${esc(e.message)}</div>`; }
+  }
+  $$('[data-t]', back).forEach((b) => (b.onclick = () => show(b.dataset.t)));
+
+  async function save(changes, btn) {
+    btn.disabled = true;
+    try {
+      const r = await pveCall(g.hostId, 'pve.config.set', { ...ref, changes });
+      if (!r.changed) toast('Keine Änderungen');
+      else if (r.pending?.length) toast(`Gespeichert – ${r.pending.join(', ')} wird beim nächsten Neustart des Gastes übernommen`);
+      else toast('Gespeichert');
+      onSaved();
+      await loadConf();
+    } catch (e) { toast(e.message, 'err'); }
+    btn.disabled = false;
+  }
+
+  async function general() {
+    const c = conf || (await loadConf());
+    const isVm = g.type === 'qemu';
+    body.innerHTML = `
+      ${c.pending?.length ? `<div class="pve-note">${icon('alert', 'sm')}Noch nicht aktiv (wird beim nächsten Neustart übernommen): ${esc(c.pending.join(', '))}</div>` : ''}
+      <div class="form-grid">
+        <div class="field"><label>Name</label><input class="input" data-f="name" value="${esc(c.name)}"></div>
+        <div class="field"><label>Tags (mit Komma getrennt)</label><input class="input" data-f="tags" value="${esc(c.tags.join(', '))}" placeholder="z.B. web, prod"></div>
+        <div class="field"><label>CPU-Kerne</label><input class="input" type="number" min="1" max="512" data-f="cores" value="${c.cores}"></div>
+        ${isVm ? `<div class="field"><label>CPU-Sockel</label><input class="input" type="number" min="1" max="16" data-f="sockets" value="${c.sockets}"></div>` : `<div class="field"><label>Swap (MB)</label><input class="input" type="number" min="0" step="128" data-f="swap" value="${c.swap}"></div>`}
+        <div class="field"><label>Arbeitsspeicher (MB)</label><input class="input" type="number" min="16" step="256" data-f="memory" value="${c.memory}"><div class="hint">${fmtBytes(c.memory * 1048576)}</div></div>
+        <div class="field"><label>Beim Booten des Hosts starten</label><label class="row" style="height:36px;gap:8px;cursor:pointer"><input type="checkbox" class="check" data-f="onboot" ${c.onboot ? 'checked' : ''}>Autostart</label></div>
+        <div class="field"><label>Startreihenfolge</label><input class="input" type="number" min="0" data-f="order" value="${esc(c.startup.order)}" placeholder="beliebig"><div class="hint">Kleinere Zahl startet zuerst</div></div>
+        <div class="field"><label>Wartezeit danach (s)</label><input class="input" type="number" min="0" data-f="up" value="${esc(c.startup.up)}" placeholder="0"><div class="hint">bevor der nächste Gast startet</div></div>
+        <div class="field" style="grid-column:1/-1"><label>Beschreibung / Notizen</label><textarea class="textarea" style="min-height:90px" data-f="description">${esc(c.description)}</textarea></div>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" data-save>${icon('check', 'sm')}Speichern</button></div>`;
+    const v = (k) => $(`[data-f="${k}"]`, body);
+    $('[data-save]', body).onclick = (e) => {
+      const ch = {};
+      if (v('name').value.trim() !== c.name) ch.name = v('name').value.trim();
+      const tags = v('tags').value.split(/[,;\s]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+      if (tags.join(';') !== c.tags.join(';')) ch.tags = tags;
+      if (Number(v('cores').value) !== c.cores) ch.cores = Number(v('cores').value);
+      if (isVm && Number(v('sockets').value) !== c.sockets) ch.sockets = Number(v('sockets').value);
+      if (!isVm && Number(v('swap').value) !== c.swap) ch.swap = Number(v('swap').value);
+      if (Number(v('memory').value) !== c.memory) ch.memory = Number(v('memory').value);
+      if (v('onboot').checked !== c.onboot) ch.onboot = v('onboot').checked;
+      const st = { order: v('order').value.trim(), up: v('up').value.trim(), down: c.startup.down };
+      if (st.order !== c.startup.order || st.up !== c.startup.up) ch.startup = st;
+      if (v('description').value !== c.description) ch.description = v('description').value;
+      save(ch, e.currentTarget);
+    };
+  }
+
+  async function net() {
+    const [c, nl] = await Promise.all([conf || loadConf(), pveCall(g.hostId, 'pve.net.list').catch(() => null)]);
+    const bridges = (nl?.ifaces || []).filter((i) => i.type === 'bridge' || i.type === 'OVSBridge');
+    const isCt = g.type === 'lxc';
+    if (!c.nets.length) { body.innerHTML = '<div class="empty">Keine Netzwerkkarte</div>'; return; }
+    body.innerHTML = c.nets.map((n) => {
+      const opts = bridges.some((b) => b.iface === n.bridge) ? bridges : [...bridges, { iface: n.bridge, comments: '' }];
+      const mode = !n.ip ? 'none' : n.ip === 'dhcp' ? 'dhcp' : n.ip === 'manual' ? 'manual' : 'static';
+      return `<div class="card card-pad pve-nic" data-key="${n.key}">
+        <div class="row" style="margin-bottom:12px;gap:10px"><b>${esc(n.key)}${n.name ? ` (${esc(n.name)})` : ''}</b><span class="muted mono" style="font-size:12px">${esc(n.model ? `${n.model} · ` : '')}${esc(n.mac)}</span></div>
+        <div class="form-grid">
+          <div class="field"><label>Brücke</label><select class="select" data-n="bridge">${opts.map((b) => `<option value="${esc(b.iface)}" ${b.iface === n.bridge ? 'selected' : ''}>${esc(b.iface)}${b.comments ? ` – ${esc(b.comments)}` : ''}${b.cidr ? ` (${esc(b.cidr)})` : ''}</option>`).join('')}</select></div>
+          <div class="field"><label>VLAN-Tag</label><input class="input" type="number" min="1" max="4094" data-n="tag" value="${esc(n.tag)}" placeholder="kein VLAN"></div>
+          <div class="field"><label>Firewall</label><label class="row" style="height:36px;gap:8px;cursor:pointer"><input type="checkbox" class="check" data-n="firewall" ${n.firewall ? 'checked' : ''}>Proxmox-Firewall für diese Karte</label></div>
+          ${isCt ? `
+          <div class="field"><label>IPv4</label><select class="select" data-n="mode"><option value="dhcp" ${mode === 'dhcp' ? 'selected' : ''}>DHCP</option><option value="static" ${mode === 'static' ? 'selected' : ''}>Statisch</option>${mode === 'manual' || mode === 'none' ? `<option value="${mode}" selected>${mode === 'manual' ? 'Manuell' : 'Nicht gesetzt'}</option>` : ''}</select></div>
+          <div class="field" data-static><label>IP/Netz</label><input class="input mono" data-n="ip" value="${mode === 'static' ? esc(n.ip) : ''}" placeholder="10.2.30.50/24"></div>
+          <div class="field" data-static><label>Gateway</label><input class="input mono" data-n="gw" value="${esc(n.gw)}" placeholder="10.2.30.1"></div>` : ''}
+        </div></div>`;
+    }).join('') + `<div class="hint" style="margin:8px 0 0">Änderungen an laufenden Gästen greifen sofort. Hängt die Verbindung des Gastes an dieser Karte, kann er kurz offline sein.</div>
+      <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn primary" data-save>${icon('check', 'sm')}Speichern</button></div>`;
+    const syncStatic = (card) => $$('[data-static]', card).forEach((f) => (f.style.display = $('[data-n="mode"]', card)?.value === 'static' ? '' : 'none'));
+    $$('.pve-nic', body).forEach((card) => {
+      syncStatic(card);
+      const m = $('[data-n="mode"]', card);
+      if (m) m.onchange = () => syncStatic(card);
+    });
+    $('[data-save]', body).onclick = (e) => {
+      const nets = [];
+      for (const card of $$('.pve-nic', body)) {
+        const n = c.nets.find((x) => x.key === card.dataset.key);
+        const q = (k) => $(`[data-n="${k}"]`, card);
+        const out = { key: n.key };
+        if (q('bridge').value !== n.bridge) out.bridge = q('bridge').value;
+        if (q('tag').value.trim() !== n.tag) out.tag = q('tag').value.trim();
+        if (q('firewall').checked !== n.firewall) out.firewall = q('firewall').checked;
+        if (isCt && q('mode')) {
+          const m = q('mode').value;
+          const ip = m === 'static' ? q('ip').value.trim() : m;
+          const gw = m === 'static' ? q('gw').value.trim() : '';
+          if (m !== 'none' && (ip !== n.ip || gw !== n.gw)) { out.ip = ip; out.gw = gw; }
+        }
+        if (Object.keys(out).length > 1) nets.push(out);
+      }
+      save(nets.length ? { nets } : {}, e.currentTarget);
+    };
+  }
+
+  async function snap() {
+    const r = await pveCall(g.hostId, 'pve.snap.list', ref);
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    body.innerHTML = `
+      <div class="card card-pad" style="margin-bottom:14px">
+        <div class="form-grid">
+          <div class="field"><label>Neuer Snapshot</label><input class="input" data-sn value="snap-${stamp}"></div>
+          <div class="field"><label>Beschreibung</label><input class="input" data-sd placeholder="z.B. vor dem Update"></div>
+        </div>
+        <div class="row" style="justify-content:space-between;margin-top:12px">
+          ${g.type === 'qemu' ? '<label class="row" style="gap:8px;cursor:pointer;font-size:13px"><input type="checkbox" class="check" data-sv>Arbeitsspeicher mitsichern (VM läuft danach exakt weiter, dauert länger)</label>' : '<span></span>'}
+          <button class="btn primary" data-screate>${icon('plus', 'sm')}Snapshot anlegen</button>
+        </div>
+      </div>
+      <div class="card table-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Erstellt</th><th>Beschreibung</th><th>RAM</th><th></th></tr></thead><tbody>
+        ${r.snapshots.map((s) => `<tr data-s="${esc(s.name)}">
+          <td style="font-weight:500">${esc(s.name)}${s.name === r.current ? ' <span class="badge accent">aktueller Stand</span>' : ''}</td>
+          <td class="muted">${fmtDate(s.snaptime)}</td><td>${esc(s.description)}</td><td>${s.vmstate ? icon('check', 'sm') : ''}</td>
+          <td style="white-space:nowrap;text-align:right"><button class="btn sm" data-sk="rollback">${icon('back', 'sm')}Zurückrollen</button> <button class="btn sm danger icon-only" data-sk="delete" title="Löschen">${icon('trash', 'sm')}</button></td></tr>`).join('')
+        || '<tr><td colspan="5"><div class="empty">Noch keine Snapshots</div></td></tr>'}
+      </tbody></table></div>`;
+    const after = (msg) => { toast(msg); setTimeout(() => show('snap'), 3000); };
+    $('[data-screate]', body).onclick = async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const res = await pveCall(g.hostId, 'pve.snap', { ...ref, op: 'create', snapname: $('[data-sn]', body).value.trim(), description: $('[data-sd]', body).value, vmstate: !!$('[data-sv]', body)?.checked });
+        after(res.done === false ? 'Snapshot wird angelegt (läuft im Hintergrund)' : 'Snapshot angelegt');
+      } catch (err) { toast(err.message, 'err'); btn.disabled = false; }
+    };
+    $$('[data-sk]', body).forEach((b) => (b.onclick = async () => {
+      const snapname = b.closest('tr').dataset.s;
+      const rollback = b.dataset.sk === 'rollback';
+      const ok = await confirmDialog(rollback
+        ? { title: `Auf „${snapname}“ zurückrollen?`, text: `<b>${esc(g.name)}</b> wird auf den Stand dieses Snapshots zurückgesetzt. Alles, was danach geändert wurde, geht verloren.`, okText: 'Zurückrollen', danger: true }
+        : { title: `Snapshot „${snapname}“ löschen?`, text: 'Der Snapshot wird endgültig entfernt. Der aktuelle Stand des Gastes bleibt unverändert.', okText: 'Löschen', danger: true });
+      if (!ok) return;
+      try {
+        await pveCall(g.hostId, 'pve.snap', { ...ref, op: b.dataset.sk, snapname });
+        after(rollback ? 'Wird zurückgerollt' : 'Snapshot wird gelöscht');
+      } catch (err) { toast(err.message, 'err'); }
+    }));
+  }
+
+  async function backup() {
+    const r = await pveCall(g.hostId, 'pve.backup.info', ref);
+    body.innerHTML = `
+      <div class="card card-pad" style="margin-bottom:14px">
+        ${r.storages.length ? `<div class="form-grid">
+          <div class="field"><label>Speicher</label><select class="select" data-bs>${r.storages.map((s) => `<option value="${esc(s.storage)}">${esc(s.storage)} (${esc(s.type)}) – ${fmtBytes(s.avail)} frei</option>`).join('')}</select></div>
+          <div class="field"><label>Modus</label><select class="select" data-bm><option value="snapshot">Snapshot – Gast läuft weiter</option><option value="suspend">Anhalten – kurz pausiert</option><option value="stop">Stopp – Gast wird kurz heruntergefahren</option></select></div>
+          <div class="field" style="grid-column:1/-1"><label>Notiz</label><input class="input" data-bn placeholder="z.B. vor Umbau"></div>
+        </div>
+        <div class="row" style="justify-content:space-between;margin-top:12px"><span class="hint">Den Fortschritt siehst du beim Host unter „Aufgaben“.</span><button class="btn primary" data-brun>${icon('download', 'sm')}Backup jetzt starten</button></div>`
+        : '<div class="muted">Kein Speicher für Backups eingerichtet (in Proxmox unter Rechenzentrum → Storage den Inhalt „VZDump-Backup“ erlauben).</div>'}
+      </div>
+      <div class="card table-wrap"><table class="tbl"><thead><tr><th>Erstellt</th><th>Speicher</th><th class="r">Größe</th><th>Notiz</th></tr></thead><tbody>
+        ${r.backups.map((b) => `<tr title="${esc(b.volid)}"><td>${fmtDate(b.ctime)}${b.protected ? ` ${icon('key', 'sm')}` : ''}</td><td>${esc(b.storage)}</td><td class="r num">${fmtBytes(b.size)}</td><td class="muted">${esc(b.notes)}</td></tr>`).join('')
+        || '<tr><td colspan="4"><div class="empty">Noch keine Backups</div></td></tr>'}
+      </tbody></table></div>`;
+    const run = $('[data-brun]', body);
+    if (run) {
+      run.onclick = async () => {
+        run.disabled = true;
+        try {
+          await pveCall(g.hostId, 'pve.backup.run', { ...ref, storage: $('[data-bs]', body).value, mode: $('[data-bm]', body).value, notes: $('[data-bn]', body).value });
+          toast('Backup gestartet – läuft im Hintergrund');
+        } catch (e) { toast(e.message, 'err'); run.disabled = false; }
+      };
+    }
+  }
+
+  show('general');
+  return close;
+}
+
+// ---------- Host-Bereich mit Reitern ----------
+const TASK_TYPES = {
+  vzdump: 'Backup', qmsnapshot: 'Snapshot', vzsnapshot: 'Snapshot', qmrollback: 'Snapshot zurückrollen', vzrollback: 'Snapshot zurückrollen',
+  qmdelsnapshot: 'Snapshot löschen', vzdelsnapshot: 'Snapshot löschen', qmstart: 'Start', vzstart: 'Start', qmstop: 'Ausschalten', vzstop: 'Ausschalten',
+  qmshutdown: 'Herunterfahren', vzshutdown: 'Herunterfahren', qmreboot: 'Neustart', vzreboot: 'Neustart', aptupdate: 'Paketlisten aktualisieren',
+  srvreload: 'Dienst neu laden', vncproxy: 'Konsole', vncshell: 'Konsole', qmigrate: 'Migration', vzmigrate: 'Migration', qmclone: 'Klonen',
+  vzcreate: 'Container anlegen', qmcreate: 'VM anlegen', imgdel: 'Disk löschen', qmdestroy: 'VM löschen', vzdestroy: 'Container löschen',
+  startall: 'Alle starten', stopall: 'Alle stoppen',
+};
+
+export function renderProxmoxHost(body, hostId, opts = {}) {
+  body.innerHTML = `
+    <div class="seg pve-hseg" data-hseg>
+      <button data-h="guests">${icon('box', 'sm')} VMs & Container</button>
+      <button data-h="host">${icon('server', 'sm')} Host & Speicher</button>
+      <button data-h="updates">${icon('download', 'sm')} Updates</button>
+      <button data-h="network">${icon('network', 'sm')} Netzwerk</button>
+      <button data-h="tasks">${icon('list', 'sm')} Aufgaben</button>
+    </div>
+    <div data-hbody></div>`;
+  let cleanup = null;
+  const views = { guests: (b) => renderProxmoxTab(b, hostId, opts), host: hostView, updates: updatesView, network: networkView, tasks: tasksView };
+  function show(v) {
+    $$('[data-h]', body).forEach((b) => b.classList.toggle('on', b.dataset.h === v));
+    cleanup?.();
+    const b = $('[data-hbody]', body);
+    b.innerHTML = '<div class="card empty">Lade ...</div>';
+    cleanup = views[v](b) || null;
+  }
+  $$('[data-h]', body).forEach((b) => (b.onclick = () => show(b.dataset.h)));
+  show('guests');
+  return () => cleanup?.();
+
+  function hostView(b) {
+    pveCall(hostId, 'pve.host').then((r) => {
+      const s = r.status;
+      b.innerHTML = `
+        <div class="card card-pad" style="margin-bottom:14px"><div class="kv">
+          <div class="k">Version</div><div class="v">${esc(s.pveversion.replace('pve-manager/', 'Proxmox VE '))}</div>
+          <div class="k">Kernel</div><div class="v">${esc(s.kversion.split(' #')[0])}</div>
+          <div class="k">Prozessor</div><div class="v">${esc(s.cpuModel)}${s.cpus ? ` · ${s.cpus} Threads` : ''}</div>
+          <div class="k">CPU</div><div class="v pve-kvbar">${miniBar(s.cpu * 100, '', 90)}<span class="muted">Last ${esc(s.loadavg.join(' / '))}</span></div>
+          <div class="k">RAM</div><div class="v pve-kvbar">${bar(s.memory.used, s.memory.total)}<span class="muted">${fmtBytes(s.memory.used)} / ${fmtBytes(s.memory.total)}</span></div>
+          <div class="k">System-Disk</div><div class="v pve-kvbar">${bar(s.rootfs.used, s.rootfs.total)}<span class="muted">${fmtBytes(s.rootfs.used)} / ${fmtBytes(s.rootfs.total)}</span></div>
+          <div class="k">Läuft seit</div><div class="v">${fmtDuration(s.uptime)}${r.rebootRequired ? ' <span class="badge warning">Neustart erforderlich</span>' : ''}</div>
+        </div></div>
+        <div class="card table-wrap"><table class="tbl"><thead><tr><th>Speicher</th><th>Typ</th><th>Inhalt</th><th>Belegung</th><th class="r">Belegt / Gesamt</th><th class="r">Frei</th><th>Status</th></tr></thead><tbody>
+          ${r.storages.map((x) => `<tr><td style="font-weight:500">${esc(x.storage)}${x.shared ? ' <span class="muted" style="font-size:12px">geteilt</span>' : ''}</td><td class="muted">${esc(x.type)}</td>
+            <td class="muted" style="font-size:12px">${esc(x.content.split(',').filter(Boolean).map((c) => ({ images: 'VM-Disks', rootdir: 'Container', iso: 'ISO', vztmpl: 'Vorlagen', backup: 'Backups', snippets: 'Snippets', import: 'Import' })[c] || c).join(', '))}</td>
+            <td>${x.active ? bar(x.used, x.total) : ''}</td><td class="r num">${x.active ? `${fmtBytes(x.used)} / ${fmtBytes(x.total)}` : '–'}</td><td class="r num">${x.active ? fmtBytes(x.avail) : '–'}</td>
+            <td>${!x.enabled ? '<span class="badge">deaktiviert</span>' : x.active ? '<span class="badge good">aktiv</span>' : '<span class="badge critical">nicht erreichbar</span>'}</td></tr>`).join('')}
+        </tbody></table></div>`;
+    }).catch((e) => (b.innerHTML = `<div class="card empty err-text">${esc(e.message)}</div>`));
+  }
+
+  function updatesView(b) {
+    const load = () => pveCall(hostId, 'pve.host').then(draw).catch((e) => (b.innerHTML = `<div class="card empty err-text">${esc(e.message)}</div>`));
+    function draw(r) {
+      b.innerHTML = `
+        <div class="toolbar">
+          <span class="muted" style="font-size:13px">${r.updates.length ? `${r.updates.length} Update(s) verfügbar` : 'Alles aktuell'}${r.rebootRequired ? ' · <span class="badge warning">Neustart erforderlich</span>' : ''}</span>
+          <span class="spacer grow"></span>
+          <button class="btn" data-urefresh>${icon('refresh', 'sm')}Paketlisten aktualisieren</button>
+          <button class="btn primary" data-uinstall ${r.updates.length ? '' : 'disabled'}>${icon('download', 'sm')}Updates installieren</button>
+          <button class="btn danger" data-ureboot>${icon('power', 'sm')}Host neu starten</button>
+        </div>
+        <div class="card table-wrap"><table class="tbl"><thead><tr><th>Paket</th><th>Installiert</th><th>Neu</th><th>Beschreibung</th></tr></thead><tbody>
+          ${r.updates.map((u) => `<tr><td style="font-weight:500">${esc(u.package)}</td><td class="mono muted" style="font-size:12px">${esc(u.from)}</td><td class="mono" style="font-size:12px">${esc(u.to)}</td><td class="muted">${esc(u.title)}</td></tr>`).join('')
+          || `<tr><td colspan="4"><div class="empty">${icon('check')}<h3>Keine Updates</h3><div>Stand der letzten Prüfung – mit „Paketlisten aktualisieren“ neu prüfen.</div></div></td></tr>`}
+        </tbody></table></div>`;
+      $('[data-urefresh]', b).onclick = async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.innerHTML = `${icon('refresh', 'sm spin')}Prüfe ...`;
+        try { await pveCall(hostId, 'pve.apt.refresh'); } catch (err) { toast(err.message, 'err'); }
+        load();
+      };
+      $('[data-uinstall]', b).onclick = async () => {
+        if (!(await confirmDialog({ title: 'Proxmox-Updates installieren?', text: `${r.updates.length} Paket(e) werden installiert (apt dist-upgrade). Laufende Gäste bleiben an. Die Ausgabe erscheint unter <b>Verlauf → Skript-Ausgaben</b>. Nach Kernel-Updates ist ein Neustart des Hosts nötig.`, okText: 'Installieren' }))) return;
+        try { await api.post(`/api/agents/${hostId}/pve/upgrade`); toast('Updates werden installiert – Ausgabe unter Verlauf → Skript-Ausgaben'); } catch (err) { toast(err.message, 'err'); }
+      };
+      $('[data-ureboot]', b).onclick = async () => {
+        if (!(await confirmDialog({ title: 'Proxmox-Host neu starten?', text: 'Alle laufenden VMs und Container auf diesem Host werden dabei heruntergefahren und – sofern Autostart gesetzt ist – danach wieder gestartet.', okText: 'Host neu starten', danger: true }))) return;
+        try { await api.action(hostId, 'reboot'); toast('Host wird neu gestartet'); } catch (err) { toast(err.message, 'err'); }
+      };
+    }
+    load();
+  }
+
+  function networkView(b) {
+    let data = null;
+    const load = () => pveCall(hostId, 'pve.net.list').then((r) => { data = r; draw(); }).catch((e) => (b.innerHTML = `<div class="card empty err-text">${esc(e.message)}</div>`));
+    const typeName = (t) => ({ bridge: 'Brücke', eth: 'Netzwerkkarte', bond: 'Bond', vlan: 'VLAN', OVSBridge: 'OVS-Brücke' })[t] || t;
+    const dash = '<span class="muted">–</span>';
+    function draw() {
+      const r = data;
+      b.innerHTML = `
+        ${r.pending ? `<div class="card card-pad pve-pending">
+          <div class="row" style="gap:10px;flex-wrap:wrap">${icon('alert', 'sm')}<b>Ausstehende Änderungen</b><span class="muted" style="font-size:12.5px">noch nicht aktiv</span><span class="spacer grow"></span>
+            <button class="btn" data-nrevert>Verwerfen</button><button class="btn primary" data-napply>${icon('check', 'sm')}Übernehmen</button></div>
+          <pre class="output" style="max-height:220px;margin-top:10px">${esc(r.diff)}</pre></div>` : ''}
+        <div class="toolbar"><span class="muted" style="font-size:13px">Netzwerk-Schnittstellen des Hosts</span><span class="spacer grow"></span><button class="btn" data-nadd>${icon('plus', 'sm')}Brücke hinzufügen</button></div>
+        <div class="card table-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Typ</th><th>IP/Netz</th><th>Gateway</th><th>Ports</th><th>VLAN-fähig</th><th>Autostart</th><th>Kommentar</th><th>Status</th><th></th></tr></thead><tbody>
+          ${r.ifaces.map((i) => `<tr data-i="${esc(i.iface)}"><td style="font-weight:500">${esc(i.iface)}</td><td class="muted">${esc(typeName(i.type))}</td>
+            <td class="mono" style="font-size:12px">${i.cidr ? esc(i.cidr) : dash}</td><td class="mono" style="font-size:12px">${i.gateway ? esc(i.gateway) : dash}</td>
+            <td class="mono" style="font-size:12px">${i.ports ? esc(i.ports) : dash}</td><td>${i.type === 'bridge' ? (i.vlanAware ? icon('check', 'sm') : dash) : ''}</td>
+            <td>${i.autostart ? icon('check', 'sm') : dash}</td><td class="muted">${esc(i.comments)}</td>
+            <td>${i.active ? '<span class="badge good">aktiv</span>' : '<span class="badge">inaktiv</span>'}</td>
+            <td style="white-space:nowrap;text-align:right">${/^vmbr\d+$/.test(i.iface) ? `<button class="btn sm icon-only" data-nedit title="Bearbeiten">${icon('edit', 'sm')}</button> <button class="btn sm danger icon-only" data-ndel title="Löschen">${icon('trash', 'sm')}</button>` : ''}</td></tr>`).join('')}
+        </tbody></table></div>
+        <div class="hint" style="margin-top:8px">Änderungen werden erst gesammelt und mit „Übernehmen“ aktiv. Ist der BOLZO-Server danach nicht erreichbar, stellt der Agent die alte Konfiguration nach etwa einer Minute automatisch wieder her.</div>`;
+      $('[data-nadd]', b).onclick = () => bridgeDialog(null);
+      $$('[data-nedit]', b).forEach((x) => (x.onclick = () => bridgeDialog(r.ifaces.find((i) => i.iface === x.closest('tr').dataset.i))));
+      $$('[data-ndel]', b).forEach((x) => (x.onclick = async () => {
+        const iface = x.closest('tr').dataset.i;
+        const mgmt = r.ifaces.find((i) => i.iface === iface)?.gateway;
+        if (!(await confirmDialog({ title: `${iface} löschen?`, text: `${mgmt ? '<b>Achtung: Über diese Brücke läuft vermutlich die Verwaltung des Hosts (Gateway gesetzt).</b><br>' : ''}Gäste an dieser Brücke verlieren nach dem Übernehmen ihr Netzwerk. Die Änderung wird erst mit „Übernehmen“ aktiv.`, okText: 'Löschen', danger: true }))) return;
+        try { await pveCall(hostId, 'pve.net.delete', { iface }); load(); } catch (e) { toast(e.message, 'err'); }
+      }));
+      const revert = $('[data-nrevert]', b);
+      if (revert) {
+        revert.onclick = async () => {
+          try { await pveCall(hostId, 'pve.net.revert'); toast('Änderungen verworfen'); load(); } catch (e) { toast(e.message, 'err'); }
+        };
+      }
+      const apply = $('[data-napply]', b);
+      if (apply) {
+        apply.onclick = async () => {
+          if (!(await confirmDialog({ title: 'Netzwerk-Änderungen übernehmen?', text: 'Das Netzwerk des Hosts wird neu geladen. Ist der BOLZO-Server danach nicht mehr erreichbar, wird die vorherige Konfiguration nach etwa einer Minute automatisch wiederhergestellt.', okText: 'Übernehmen' }))) return;
+          apply.disabled = true;
+          apply.innerHTML = `${icon('refresh', 'sm spin')}Wird angewendet ...`;
+          try {
+            const res = await pveCall(hostId, 'pve.net.apply');
+            if (res.rolledBack) toast(res.message, 'err'); else toast('Netzwerk-Änderungen übernommen');
+          } catch (err) {
+            toast(`${err.message} – der Host lädt evtl. noch neu; bitte gleich erneut prüfen`, 'err');
+          }
+          load();
+        };
+      }
+    }
+    function bridgeDialog(i) {
+      const create = !i;
+      const next = `vmbr${Math.max(-1, ...data.ifaces.map((x) => Number((x.iface.match(/^vmbr(\d+)$/) || [])[1] ?? -1))) + 1}`;
+      const nics = data.ifaces.filter((x) => ['eth', 'bond', 'vlan'].includes(x.type)).map((x) => x.iface);
+      const { el: m, close } = modal({
+        title: create ? 'Brücke hinzufügen' : `${i.iface} bearbeiten`,
+        body: `<div class="form-grid">
+          <div class="field"><label>Name</label><input class="input mono" data-b="iface" value="${esc(i?.iface || next)}" ${create ? '' : 'disabled'}></div>
+          <div class="field"><label>IP/Netz (optional)</label><input class="input mono" data-b="cidr" value="${esc(i?.cidr || '')}" placeholder="z.B. 192.168.20.1/24"></div>
+          <div class="field"><label>Gateway (optional)</label><input class="input mono" data-b="gateway" value="${esc(i?.gateway || '')}" placeholder="nur bei der Haupt-Brücke"></div>
+          <div class="field"><label>Ports</label><input class="input mono" data-b="ports" value="${esc(i?.ports || '')}" placeholder="${esc(nics.join(' ') || 'leer = nur intern')}"><div class="hint">Leer = internes Netz ohne Verbindung nach außen${nics.length ? `. Vorhanden: ${esc(nics.join(', '))}` : ''}</div></div>
+          <div class="field"><label>Kommentar</label><input class="input" data-b="comments" value="${esc(i?.comments || '')}"></div>
+          <div class="field"><label>Optionen</label>
+            <label class="row" style="gap:8px;cursor:pointer;height:28px"><input type="checkbox" class="check" data-b="vlanAware" ${i?.vlanAware ? 'checked' : ''}>VLAN-fähig</label>
+            <label class="row" style="gap:8px;cursor:pointer;height:28px"><input type="checkbox" class="check" data-b="autostart" ${!i || i.autostart ? 'checked' : ''}>Autostart</label></div>
+        </div>
+        ${!create && i.gateway ? `<div class="pve-note" style="margin-top:12px">${icon('alert', 'sm')}Über diese Brücke läuft die Verwaltung des Hosts. Falsche Werte können ihn unerreichbar machen – die automatische Wiederherstellung greift dann nach etwa einer Minute.</div>` : ''}`,
+        foot: `<button class="btn" data-close>Abbrechen</button><button class="btn primary" data-bsave>Speichern</button>`,
+      });
+      $('[data-bsave]', m).onclick = async () => {
+        const v = (k) => $(`[data-b="${k}"]`, m);
+        try {
+          await pveCall(hostId, 'pve.net.save', { create, iface: v('iface').value.trim(), cidr: v('cidr').value.trim(), gateway: v('gateway').value.trim(), ports: v('ports').value.trim(), comments: v('comments').value, vlanAware: v('vlanAware').checked, autostart: v('autostart').checked });
+          toast('Gespeichert – mit „Übernehmen“ aktivieren');
+          close();
+          load();
+        } catch (e) { toast(e.message, 'err'); }
+      };
+    }
+    load();
+  }
+
+  function tasksView(b) {
+    const load = () => pveCall(hostId, 'pve.tasks').then((list) => {
+      b.innerHTML = `<div class="card table-wrap"><table class="tbl"><thead><tr><th>Start</th><th>Aufgabe</th><th>Gast</th><th>Benutzer</th><th>Dauer</th><th>Status</th></tr></thead><tbody>
+        ${list.map((t) => {
+          const running = !t.end;
+          const ok = t.status === 'OK';
+          const status = running ? `<span class="badge accent">${icon('refresh', 'spin')}läuft</span>`
+            : ok ? '<span class="badge good">OK</span>'
+            : `<span class="badge ${/^WARNINGS/.test(t.status) ? 'warning' : 'critical'}" title="${esc(t.status)}">${esc(t.status.slice(0, 40))}</span>`;
+          return `<tr><td class="muted num">${fmtDate(t.start)}</td><td style="font-weight:500">${esc(TASK_TYPES[t.type] || t.type)}</td><td class="num">${esc(t.id)}</td><td class="muted">${esc(t.user)}</td>
+            <td class="num muted">${fmtDuration(((t.end || Date.now()) - t.start) / 1000)}</td><td>${status}</td></tr>`;
+        }).join('') || '<tr><td colspan="6"><div class="empty">Keine Aufgaben</div></td></tr>'}
+      </tbody></table></div>`;
+    }).catch((e) => (b.innerHTML = `<div class="card empty err-text">${esc(e.message)}</div>`));
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }
 }

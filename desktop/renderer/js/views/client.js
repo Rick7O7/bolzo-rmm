@@ -6,7 +6,7 @@ import {
 import { lineChart } from '../charts.js';
 import { RemoteTerminal } from '../terminal.js';
 import { showRunResult, renderAuditLog } from './history.js';
-import { assignDialog, openConsole, pvePower, renderProxmoxTab } from '../proxmox.js';
+import { assignDialog, openConsole, pvePower, renderProxmoxHost } from '../proxmox.js';
 
 const TABS = [
   { key: 'overview', label: 'Übersicht', icon: 'activity' },
@@ -467,7 +467,7 @@ export function renderClient(root, { go, params }) {
 
   // Proxmox-Host: VMs und Container
   function proxmox(body) {
-    return renderProxmoxTab(body, id);
+    return renderProxmoxHost(body, id);
   }
 
   // Protokoll: alles, was mit diesem Client passiert ist

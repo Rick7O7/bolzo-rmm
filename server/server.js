@@ -473,6 +473,60 @@ app.post('/api/agents/:id/pve/power', requireAdmin, wrap(async (req, res) => {
   }
 }));
 
+// Verwaltung: Gast-Einstellungen, Snapshots, Backups, Host (Speicher, Updates, Aufgaben, Netzwerk).
+// Nur diese Agent-Aktionen sind erlaubt; verändernde landen im Protokoll.
+const PVE_CALLS = {
+  'pve.config.get': { guest: true },
+  'pve.config.set': { guest: true, audit: 'Proxmox: Einstellungen geändert', detail: (p) => Object.keys(p.changes || {}).join(', ') },
+  'pve.snap.list': { guest: true },
+  'pve.snap': { guest: true, timeout: 45000, audit: (p) => ({ create: 'Proxmox: Snapshot angelegt', rollback: 'Proxmox: Snapshot zurückgerollt', delete: 'Proxmox: Snapshot gelöscht' })[p.op], detail: (p) => p.snapname },
+  'pve.backup.info': { guest: true, timeout: 60000 },
+  'pve.backup.run': { guest: true, audit: 'Proxmox: Backup gestartet', detail: (p) => `auf ${p.storage} (${p.mode || 'snapshot'})` },
+  'pve.host': { timeout: 60000 },
+  'pve.apt.refresh': { timeout: 150000, audit: 'Proxmox: Paketlisten aktualisiert' },
+  'pve.tasks': {},
+  'pve.net.list': {},
+  'pve.net.save': { audit: (p) => (p.create ? 'Proxmox: Brücke angelegt' : 'Proxmox: Brücke geändert'), detail: (p) => [p.iface, p.cidr, p.ports].filter(Boolean).join(' · ') },
+  'pve.net.delete': { audit: 'Proxmox: Brücke gelöscht', detail: (p) => p.iface },
+  'pve.net.revert': { audit: 'Proxmox: Netzwerk-Änderungen verworfen' },
+  'pve.net.apply': { timeout: 240000, audit: 'Proxmox: Netzwerk-Änderungen angewendet' },
+};
+
+app.post('/api/agents/:id/pve/call', requireAdmin, wrap(async (req, res) => {
+  const h = pveHost(req);
+  const { action, params = {} } = req.body || {};
+  const def = PVE_CALLS[action];
+  if (!def) throw httpError(400, 'Unbekannte Proxmox-Aktion');
+  const label = typeof def.audit === 'function' ? def.audit(params) : def.audit;
+  let what = { agentId: h.id, target: agentLabel(h) };
+  if (def.guest) {
+    const g = guestParams(params);
+    what = guestAudit(h, g.vmid, g.type, g.name);
+  }
+  const detail = [what.detail, def.detail?.(params)].filter(Boolean).join(' – ') || undefined;
+  try {
+    const r = await agentRequest(h.id, action, params, def.timeout || 30000);
+    if (label) auditReq(req, def.guest ? 'action' : 'settings', label, { ...what, detail, ok: r?.ok !== false, result: r?.message });
+    res.json(r ?? { ok: true });
+  } catch (e) {
+    if (label) auditReq(req, def.guest ? 'action' : 'settings', label, { ...what, detail, ok: false, result: e.message });
+    throw e;
+  }
+}));
+
+// Updates des Proxmox-Hosts installieren: läuft als Skript, Ausgabe unter Verlauf -> Skript-Ausgaben
+app.post('/api/agents/:id/pve/upgrade', requireAdmin, wrap(async (req, res) => {
+  const h = pveHost(req);
+  if (!conns.has(h.id)) throw httpError(409, 'Client ist offline');
+  const script = {
+    name: 'Proxmox-Updates installieren', shell: 'bash', timeout: 3600,
+    body: 'export DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade\n[ -f /run/reboot-required ] && echo "*** Neustart erforderlich ***" || true',
+  };
+  log(`[pve] Updates auf ${agentLabel(h)} gestartet`);
+  runOn(h.id, script, req).catch(() => {}); // dauert lange – Ergebnis kommt über den Verlauf
+  res.json({ ok: true, started: true });
+}));
+
 // BOLZO-Agent im Gast neu starten (pct exec bzw. QEMU-Gast-Agent), z.B. wenn er hängt
 app.post('/api/agents/:id/pve/restart-agent', requireAdmin, wrap(async (req, res) => {
   const h = pveHost(req);

@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.3.2';
+const VERSION = '1.4.0';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -553,19 +553,365 @@ async function pvePower(p) {
   if (!PVE_OPS.includes(p.op)) throw new Error('Unbekannte Aktion');
   if (!IS_PVE) throw new Error('Kein Proxmox-Host');
   if (TEST_PVE) return { ok: true, test: true };
-  const child = cp.spawn(...outside('pvesh', ['create', `/nodes/${pveNode()}/${type}/${vmid}/status/${p.op}`]), { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = await pveRun(['create', `/nodes/${pveNode()}/${type}/${vmid}/status/${p.op}`], 8000);
+  return { ok: true, pending: !r.done };
+}
+
+// pvesh im Hintergrund starten und kurz auf Fehler warten. Lange Aufgaben (Backup, Snapshot mit
+// RAM-Zustand) laufen danach weiter; ihr Ergebnis steht unter "Aufgaben".
+async function pveRun(args, waitMs = 10000) {
+  if (!IS_PVE) throw new Error('Kein Proxmox-Host');
+  const child = cp.spawn(...outside('pvesh', args), { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
   child.stderr.on('data', (d) => (out += d));
   const code = await new Promise((resolve) => {
-    const t = setTimeout(() => resolve(null), 8000);
+    const t = setTimeout(() => resolve(null), waitMs);
     child.on('close', (c) => { clearTimeout(t); resolve(c); });
     child.on('error', () => { clearTimeout(t); resolve(-1); });
   });
   child.unref();
   if (code !== null && code !== 0) throw new Error(out.trim().split('\n').filter(Boolean).pop() || `Fehler (${code})`);
-  return { ok: true, pending: code === null };
+  return { done: code !== null, output: out.trim() };
 }
+
+// ---------- Einstellungen von VMs/Containern ----------
+const NAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,61}[a-zA-Z0-9])?$/;
+const SNAP_RE = /^[A-Za-z][A-Za-z0-9_-]{1,39}$/;
+const STORAGE_RE = /^[A-Za-z0-9][\w.-]{0,63}$/;
+const IFACE_RE = /^[a-zA-Z][\w.-]{0,14}$/;
+const IPV4 = String.raw`(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}`;
+const CIDR_RE = new RegExp(`^${IPV4}/(?:[0-9]|[12]\\d|3[0-2])$`);
+const IP_RE = new RegExp(`^${IPV4}$`);
+const guestBase = (vmid, type) => `/nodes/${pveNode()}/${type}/${vmid}`;
+const intIn = (v, min, max, what) => {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${what}: ${min} bis ${max}`);
+  return n;
+};
+const normTags = (tags) => [...new Set((Array.isArray(tags) ? tags : String(tags || '').split(/[;,\s]+/))
+  .map((t) => String(t).trim().toLowerCase()).filter((t) => /^[a-z0-9_][a-z0-9_+.-]*$/.test(t)))];
+
+// "virtio=BC:24:11:..,bridge=vmbr0,tag=10" -> geordnete Schlüssel/Werte
+function parseNet(str) {
+  const parts = String(str || '').split(',').filter(Boolean).map((x) => {
+    const i = x.indexOf('=');
+    return i < 0 ? [x, ''] : [x.slice(0, i), x.slice(i + 1)];
+  });
+  const kv = Object.fromEntries(parts);
+  const model = parts[0] && /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(parts[0][1]) ? parts[0][0] : '';
+  return {
+    parts, model, mac: (model ? kv[model] : kv.hwaddr) || '', name: kv.name || '', bridge: kv.bridge || '',
+    tag: kv.tag || '', firewall: kv.firewall === '1', ip: kv.ip || '', gw: kv.gw || '', rate: kv.rate || '',
+  };
+}
+const buildNet = (parts) => parts.map(([k, v]) => (v === '' && !k.includes('=') ? k : `${k}=${v}`)).join(',');
+function setPart(parts, key, value) {
+  const i = parts.findIndex(([k]) => k === key);
+  if (value === '' || value == null) { if (i >= 0) parts.splice(i, 1); return; }
+  if (i >= 0) parts[i][1] = String(value); else parts.push([key, String(value)]);
+}
+
+async function pveConfigGet(p) {
+  const { vmid, type } = checkGuest(p);
+  if (TEST_PVE) return testFixture('config', type);
+  const base = guestBase(vmid, type);
+  const [c, pending] = await Promise.all([pvesh('get', `${base}/config`), pvesh('get', `${base}/pending`).catch(() => [])]);
+  const startup = Object.fromEntries(String(c.startup || '').split(',').filter(Boolean).map((x) => x.split('=')));
+  return {
+    name: c.name || c.hostname || '', cores: Number(c.cores) || 1, sockets: Number(c.sockets) || 1,
+    memory: Number(c.memory) || 512, swap: Number(c.swap) || 0, onboot: Number(c.onboot) === 1,
+    startup: { order: startup.order || '', up: startup.up || '', down: startup.down || '' },
+    tags: normTags(c.tags), description: c.description || '', ostype: c.ostype || '',
+    nets: Object.keys(c).filter((k) => /^net\d+$/.test(k)).sort().map((k) => {
+      const { parts, ...n } = parseNet(c[k]);
+      return { key: k, ...n };
+    }),
+    pending: (pending || []).filter((x) => x.pending !== undefined || x.delete).map((x) => x.key),
+  };
+}
+
+async function pveConfigSet(p) {
+  const { vmid, type } = checkGuest(p);
+  const ch = p.changes || {};
+  const args = [];
+  const del = [];
+  if ('name' in ch) {
+    if (!NAME_RE.test(ch.name)) throw new Error('Name: nur Buchstaben, Ziffern, Punkt und Bindestrich');
+    args.push(type === 'lxc' ? '--hostname' : '--name', ch.name);
+  }
+  if ('cores' in ch) args.push('--cores', String(intIn(ch.cores, 1, 512, 'Kerne')));
+  if ('sockets' in ch && type === 'qemu') args.push('--sockets', String(intIn(ch.sockets, 1, 16, 'Sockel')));
+  if ('memory' in ch) args.push('--memory', String(intIn(ch.memory, 16, 8388608, 'RAM (MB)')));
+  if ('swap' in ch && type === 'lxc') args.push('--swap', String(intIn(ch.swap, 0, 8388608, 'Swap (MB)')));
+  if ('onboot' in ch) args.push('--onboot', ch.onboot ? '1' : '0');
+  if ('startup' in ch) {
+    const st = ch.startup || {};
+    const sp = [];
+    if (st.order !== '' && st.order != null) sp.push(`order=${intIn(st.order, 0, 99999, 'Startreihenfolge')}`);
+    if (st.up !== '' && st.up != null) sp.push(`up=${intIn(st.up, 0, 86400, 'Startverzögerung')}`);
+    if (st.down !== '' && st.down != null) sp.push(`down=${intIn(st.down, 0, 86400, 'Herunterfahr-Wartezeit')}`);
+    if (sp.length) args.push('--startup', sp.join(',')); else del.push('startup');
+  }
+  if ('tags' in ch) {
+    const t = normTags(ch.tags);
+    if (t.length) args.push('--tags', t.join(';')); else del.push('tags');
+  }
+  if ('description' in ch) {
+    const d = String(ch.description || '').slice(0, 8000);
+    if (d.trim()) args.push('--description', d); else del.push('description');
+  }
+  if (Array.isArray(ch.nets) && ch.nets.length) {
+    const cur = TEST_PVE ? {} : await pvesh('get', `${guestBase(vmid, type)}/config`);
+    for (const n of ch.nets) {
+      if (!/^net\d+$/.test(n.key) || (!TEST_PVE && !cur[n.key])) throw new Error(`Unbekannte Netzwerkkarte ${n.key}`);
+      const { parts } = parseNet(cur[n.key] || '');
+      if ('bridge' in n) {
+        if (!IFACE_RE.test(n.bridge)) throw new Error('Ungültige Brücke');
+        setPart(parts, 'bridge', n.bridge);
+      }
+      if ('tag' in n) setPart(parts, 'tag', n.tag === '' || n.tag == null ? '' : intIn(n.tag, 1, 4094, 'VLAN-Tag'));
+      if ('firewall' in n) setPart(parts, 'firewall', n.firewall ? '1' : '0');
+      if (type === 'lxc' && 'ip' in n) {
+        if (n.ip !== 'dhcp' && n.ip !== 'manual' && !CIDR_RE.test(n.ip)) throw new Error('IP: "dhcp" oder z.B. 10.2.30.50/24');
+        setPart(parts, 'ip', n.ip);
+        const gw = CIDR_RE.test(n.ip) ? String(n.gw || '') : '';
+        if (gw && !IP_RE.test(gw)) throw new Error('Ungültiges Gateway');
+        setPart(parts, 'gw', gw);
+      }
+      args.push(`--${n.key}`, buildNet(parts));
+    }
+  }
+  if (del.length) args.push('--delete', del.join(','));
+  if (!args.length) return { ok: true, changed: false };
+  if (TEST_PVE) return { ok: true, changed: true, args, pending: [] };
+  await pvesh('set', `${guestBase(vmid, type)}/config`, args);
+  const pending = await pvesh('get', `${guestBase(vmid, type)}/pending`).catch(() => []);
+  return { ok: true, changed: true, pending: (pending || []).filter((x) => x.pending !== undefined || x.delete).map((x) => x.key) };
+}
+
+// ---------- Snapshots ----------
+async function pveSnapList(p) {
+  const { vmid, type } = checkGuest(p);
+  if (TEST_PVE) return testFixture('snapshots');
+  const list = (await pvesh('get', `${guestBase(vmid, type)}/snapshot`)) || [];
+  const current = list.find((x) => x.name === 'current');
+  return {
+    current: current?.parent || '',
+    snapshots: list.filter((x) => x.name !== 'current').map((x) => ({ name: x.name, description: x.description || '', snaptime: (x.snaptime || 0) * 1000, vmstate: !!x.vmstate, parent: x.parent || '' }))
+      .sort((a, b) => b.snaptime - a.snaptime),
+  };
+}
+
+async function pveSnap(p) {
+  const { vmid, type } = checkGuest(p);
+  const name = String(p.snapname || '');
+  if (!SNAP_RE.test(name)) throw new Error('Snapshot-Name: Buchstabe am Anfang, dann Buchstaben, Ziffern, _ oder - (2–40 Zeichen)');
+  if (TEST_PVE) return { ok: true, test: true };
+  const base = guestBase(vmid, type);
+  if (p.op === 'create') {
+    const args = ['create', `${base}/snapshot`, '--snapname', name];
+    if (p.description) args.push('--description', String(p.description).slice(0, 2000));
+    if (type === 'qemu' && p.vmstate) args.push('--vmstate', '1');
+    return pveRun(args, 20000);
+  }
+  if (p.op === 'rollback') return pveRun(['create', `${base}/snapshot/${name}/rollback`], 20000);
+  if (p.op === 'delete') return pveRun(['delete', `${base}/snapshot/${name}`], 20000);
+  throw new Error('Unbekannte Snapshot-Aktion');
+}
+
+// ---------- Backups ----------
+async function pveBackupInfo(p) {
+  const { vmid } = checkGuest(p);
+  if (TEST_PVE) return testFixture('backups');
+  const node = pveNode();
+  const storages = ((await pvesh('get', `/nodes/${node}/storage`, ['--content', 'backup'])) || []).filter((x) => x.active !== 0 && x.enabled !== 0);
+  const lists = await Promise.all(storages.map((st) => pvesh('get', `/nodes/${node}/storage/${st.storage}/content`, ['--content', 'backup', '--vmid', String(vmid)]).catch(() => [])));
+  return {
+    storages: storages.map((x) => ({ storage: x.storage, type: x.type, avail: x.avail || 0, total: x.total || 0, used: x.used || 0 })),
+    backups: lists.flatMap((l, i) => (l || []).map((b) => ({ volid: b.volid, storage: storages[i].storage, size: b.size || 0, ctime: (b.ctime || 0) * 1000, notes: b.notes || '', protected: !!b.protected })))
+      .sort((a, b) => b.ctime - a.ctime),
+  };
+}
+
+async function pveBackupRun(p) {
+  const { vmid } = checkGuest(p);
+  if (!STORAGE_RE.test(String(p.storage || ''))) throw new Error('Ungültiger Speicher');
+  const mode = ['snapshot', 'suspend', 'stop'].includes(p.mode) ? p.mode : 'snapshot';
+  if (TEST_PVE) return { ok: true, test: true };
+  const args = ['create', `/nodes/${pveNode()}/vzdump`, '--vmid', String(vmid), '--storage', p.storage, '--mode', mode, '--compress', 'zstd'];
+  if (p.notes) args.push('--notes-template', String(p.notes).slice(0, 500));
+  return pveRun(args, 6000);
+}
+
+// ---------- Host: Status, Speicher, Updates, Aufgaben ----------
+async function pveHostInfo() {
+  if (TEST_PVE) return testFixture('host');
+  const node = pveNode();
+  const [status, storages, updates] = await Promise.all([
+    pvesh('get', `/nodes/${node}/status`),
+    pvesh('get', `/nodes/${node}/storage`),
+    pvesh('get', `/nodes/${node}/apt/update`).catch(() => []),
+  ]);
+  return {
+    status: {
+      pveversion: status.pveversion || '', kversion: status.kversion || '', uptime: status.uptime || 0, loadavg: status.loadavg || [],
+      cpu: status.cpu || 0, cpus: status.cpuinfo?.cpus || 0, cpuModel: status.cpuinfo?.model || '',
+      memory: status.memory || {}, swap: status.swap || {}, rootfs: status.rootfs || {},
+    },
+    storages: (storages || []).map((x) => ({ storage: x.storage, type: x.type, content: x.content || '', active: x.active !== 0, enabled: x.enabled !== 0, shared: !!x.shared, used: x.used || 0, total: x.total || 0, avail: x.avail || 0 }))
+      .sort((a, b) => a.storage.localeCompare(b.storage)),
+    updates: (updates || []).map((u) => ({ package: u.Package, title: u.Title || '', from: u.OldVersion || '', to: u.Version || '', priority: u.Priority || '' }))
+      .sort((a, b) => a.package.localeCompare(b.package)),
+    rebootRequired: fs.existsSync('/run/reboot-required') || fs.existsSync('/var/run/reboot-required'),
+  };
+}
+
+async function pveAptRefresh() {
+  if (TEST_PVE) return { ok: true, test: true };
+  return pveRun(['create', `/nodes/${pveNode()}/apt/update`], 120000);
+}
+
+async function pveTasks() {
+  if (TEST_PVE) return testFixture('tasks');
+  const list = (await pvesh('get', `/nodes/${pveNode()}/tasks`, ['--limit', '40', '--source', 'all'])) || [];
+  return list.map((t) => ({ upid: t.upid, type: t.type, id: t.id || '', user: t.user || '', status: t.status || (t.endtime ? '' : 'läuft'), start: (t.starttime || 0) * 1000, end: (t.endtime || 0) * 1000 }));
+}
+
+// ---------- Netzwerk-Brücken des Hosts ----------
+async function pveNetList() {
+  if (TEST_PVE) return testFixture('network');
+  const list = (await pvesh('get', `/nodes/${pveNode()}/network`)) || [];
+  let diff = '';
+  if (fs.existsSync('/etc/network/interfaces.new')) diff = (await exec('diff', ['-u', '/etc/network/interfaces', '/etc/network/interfaces.new'])).stdout;
+  return {
+    ifaces: list.map((i) => ({
+      iface: i.iface, type: i.type, active: !!i.active, autostart: !!i.autostart, cidr: i.cidr || (i.address && i.netmask ? `${i.address}/${i.netmask}` : ''),
+      gateway: i.gateway || '', ports: i.bridge_ports || i.slaves || '', vlanAware: !!i.bridge_vlan_aware, comments: (i.comments || '').trim(), method: i.method || '',
+    })).sort((a, b) => a.iface.localeCompare(b.iface, undefined, { numeric: true })),
+    pending: !!diff,
+    diff,
+  };
+}
+
+async function pveNetSave(p) {
+  const iface = String(p.iface || '');
+  if (!/^vmbr\d{1,4}$/.test(iface)) throw new Error('Brücken heißen vmbr0, vmbr1, …');
+  const args = ['--type', 'bridge'];
+  const del = [];
+  const cidr = String(p.cidr || '').trim();
+  if (cidr && !CIDR_RE.test(cidr)) throw new Error('IP/Netz z.B. 192.168.10.1/24');
+  if (cidr) args.push('--cidr', cidr); else if (!p.create) del.push('cidr');
+  const gw = String(p.gateway || '').trim();
+  if (gw && !IP_RE.test(gw)) throw new Error('Ungültiges Gateway');
+  if (gw && !cidr) throw new Error('Ein Gateway braucht eine IP-Adresse');
+  if (gw) args.push('--gateway', gw); else if (!p.create) del.push('gateway');
+  const ports = String(p.ports || '').trim().split(/\s+/).filter(Boolean);
+  if (ports.some((x) => !IFACE_RE.test(x))) throw new Error('Ungültiger Port-Name');
+  if (ports.length) args.push('--bridge_ports', ports.join(' ')); else if (!p.create) del.push('bridge_ports');
+  args.push('--bridge_vlan_aware', p.vlanAware ? '1' : '0', '--autostart', p.autostart === false ? '0' : '1');
+  const comments = String(p.comments || '').replace(/[\r\n]+/g, ' ').slice(0, 200).trim();
+  if (comments) args.push('--comments', comments); else if (!p.create) del.push('comments');
+  if (del.length) args.push('--delete', del.join(','));
+  if (TEST_PVE) return { ok: true, test: true, args };
+  const node = pveNode();
+  if (p.create) await pvesh('create', `/nodes/${node}/network`, ['--iface', iface, ...args]);
+  else await pvesh('set', `/nodes/${node}/network/${iface}`, args);
+  return { ok: true };
+}
+
+async function pveNetDelete(p) {
+  const iface = String(p.iface || '');
+  if (!/^vmbr\d{1,4}$/.test(iface)) throw new Error('Nur Brücken (vmbr…) können hier gelöscht werden');
+  if (TEST_PVE) return { ok: true, test: true };
+  await pvesh('delete', `/nodes/${pveNode()}/network/${iface}`);
+  return { ok: true };
+}
+
+async function pveNetRevert() {
+  if (TEST_PVE) return { ok: true, test: true };
+  await pvesh('delete', `/nodes/${pveNode()}/network`);
+  return { ok: true };
+}
+
+// Netzwerk-Änderungen anwenden – mit Sicherheitsnetz: Ist der BOLZO-Server danach nicht mehr
+// erreichbar, wird die vorherige Konfiguration wiederhergestellt (sonst wäre der Host ausgesperrt).
+async function pveNetApply() {
+  if (TEST_PVE) return { ok: true, test: true };
+  const backup = readFile('/etc/network/interfaces');
+  if (!backup) throw new Error('/etc/network/interfaces nicht lesbar');
+  if (!fs.existsSync('/etc/network/interfaces.new')) return { ok: true, changed: false };
+  fs.writeFileSync('/etc/network/interfaces.bolzo-backup', backup);
+  const r = await exec(...outside('pvesh', ['set', `/nodes/${pveNode()}/network`]), { timeout: 120000 });
+  const reachable = async () => {
+    const until = Date.now() + 60000;
+    while (Date.now() < until) {
+      try {
+        const res = await fetch(`${cfg.server}/health`, { signal: AbortSignal.timeout(5000) });
+        if (res.ok) return true;
+      } catch {}
+      await sleep(3000);
+    }
+    return false;
+  };
+  await sleep(3000);
+  if (await reachable()) return { ok: true, changed: true, output: (r.stdout + r.stderr).trim().slice(-2000) };
+  log('Server nach Netzwerkänderung nicht erreichbar – stelle vorherige Konfiguration wieder her');
+  fs.writeFileSync('/etc/network/interfaces', backup);
+  await exec('ifreload', ['-a'], { timeout: 60000 });
+  return { ok: false, rolledBack: true, message: 'Server danach nicht erreichbar – alte Netzwerk-Konfiguration wurde wiederhergestellt' };
+}
+
+// Testdaten für den Testmodus ohne Proxmox
+function testFixture(kind, type) {
+  const now = Date.now();
+  switch (kind) {
+    case 'config': return {
+      name: type === 'lxc' ? 'test-ct' : 'test-vm', cores: 2, sockets: 1, memory: 4096, swap: 512, onboot: true,
+      startup: { order: '2', up: '30', down: '' }, tags: ['web', 'prod'], description: 'Testgast\nzweite Zeile', ostype: type === 'lxc' ? 'debian' : 'win11',
+      nets: [type === 'lxc'
+        ? { key: 'net0', model: '', mac: 'bc:24:11:00:00:02', name: 'eth0', bridge: 'vmbr0', tag: '', firewall: true, ip: '10.2.30.52/24', gw: '10.2.30.1', rate: '' }
+        : { key: 'net0', model: 'virtio', mac: 'bc:24:11:00:00:01', name: '', bridge: 'vmbr0', tag: '20', firewall: false, ip: '', gw: '', rate: '' }],
+      pending: [],
+    };
+    case 'snapshots': return { current: 'vor-update', snapshots: [
+      { name: 'vor-update', description: 'Vor dem großen Update', snaptime: now - 3 * 864e5, vmstate: true, parent: 'basis' },
+      { name: 'basis', description: '', snaptime: now - 40 * 864e5, vmstate: false, parent: '' },
+    ] };
+    case 'backups': return {
+      storages: [{ storage: 'local', type: 'dir', avail: 80e9, total: 100e9, used: 20e9 }, { storage: 'nas-backup', type: 'nfs', avail: 1.2e12, total: 2e12, used: 0.8e12 }],
+      backups: [{ volid: 'nas-backup:backup/vzdump-qemu-101-2026_10_10-03_00_01.vma.zst', storage: 'nas-backup', size: 12.4e9, ctime: now - 864e5, notes: 'nächtlich', protected: false }],
+    };
+    case 'host': return {
+      status: { pveversion: 'pve-manager/9.2.21', kversion: 'Linux 6.14.8-2-pve', uptime: 1820000, loadavg: ['0.52', '0.61', '0.70'], cpu: 0.21, cpus: 16, cpuModel: 'AMD Ryzen 7 5700G', memory: { used: 26e9, total: 32e9 }, swap: { used: 0, total: 8e9 }, rootfs: { used: 30e9, total: 100e9 } },
+      storages: [
+        { storage: 'local', type: 'dir', content: 'iso,vztmpl,backup', active: true, enabled: true, shared: false, used: 20e9, total: 100e9, avail: 80e9 },
+        { storage: 'local-lvm', type: 'lvmthin', content: 'images,rootdir', active: true, enabled: true, shared: false, used: 310e9, total: 450e9, avail: 140e9 },
+        { storage: 'nas-backup', type: 'nfs', content: 'backup', active: true, enabled: true, shared: true, used: 0.8e12, total: 2e12, avail: 1.2e12 },
+      ],
+      updates: [
+        { package: 'pve-manager', title: 'Proxmox Virtual Environment Management Tools', from: '9.2.21', to: '9.2.22', priority: 'important' },
+        { package: 'proxmox-kernel-6.14', title: 'Latest Proxmox Kernel Image', from: '6.14.8-2', to: '6.14.11-1', priority: 'optional' },
+      ],
+      rebootRequired: false,
+    };
+    case 'tasks': return [
+      { upid: 'UPID:test:1', type: 'vzdump', id: '101', user: 'root@pam', status: 'läuft', start: now - 120e3, end: 0 },
+      { upid: 'UPID:test:2', type: 'qmsnapshot', id: '101', user: 'root@pam', status: 'OK', start: now - 3600e3, end: now - 3590e3 },
+      { upid: 'UPID:test:3', type: 'vzstart', id: '102', user: 'root@pam', status: 'command failed: exit code 1', start: now - 7200e3, end: now - 7199e3 },
+    ];
+    case 'network': return {
+      ifaces: [
+        { iface: 'enp3s0', type: 'eth', active: true, autostart: false, cidr: '', gateway: '', ports: '', vlanAware: false, comments: '', method: 'manual' },
+        { iface: 'vmbr0', type: 'bridge', active: true, autostart: true, cidr: '10.2.30.2/24', gateway: '10.2.30.1', ports: 'enp3s0', vlanAware: true, comments: 'LAN', method: 'static' },
+        { iface: 'vmbr1', type: 'bridge', active: true, autostart: true, cidr: '', gateway: '', ports: '', vlanAware: false, comments: 'intern', method: 'manual' },
+      ],
+      pending: false, diff: '',
+    };
+    default: return null;
+  }
+}
+
 
 const tunnels = new Map();
 
@@ -756,6 +1102,20 @@ const actions = {
   'pve.guests': pveGuests,
   'pve.power': pvePower,
   'pve.restartAgent': pveRestartAgent,
+  'pve.config.get': pveConfigGet,
+  'pve.config.set': pveConfigSet,
+  'pve.snap.list': pveSnapList,
+  'pve.snap': pveSnap,
+  'pve.backup.info': pveBackupInfo,
+  'pve.backup.run': pveBackupRun,
+  'pve.host': pveHostInfo,
+  'pve.apt.refresh': pveAptRefresh,
+  'pve.tasks': pveTasks,
+  'pve.net.list': pveNetList,
+  'pve.net.save': pveNetSave,
+  'pve.net.delete': pveNetDelete,
+  'pve.net.revert': pveNetRevert,
+  'pve.net.apply': pveNetApply,
   'vnc.open': vncOpen,
   'tunnel.close': ({ sid }) => { tunnels.get(sid)?.close(); return { ok: true }; },
 };

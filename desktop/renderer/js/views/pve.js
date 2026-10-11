@@ -1,7 +1,7 @@
 // Eigener Bereich "Proxmox": alle Proxmox-Server mit ihren VMs und Containern auf einer Seite
 import { api } from '../api.js';
 import { icon, esc, $, statusHtml, meter, memPct } from '../ui.js';
-import { proxmoxHosts, renderProxmoxTab } from '../proxmox.js';
+import { proxmoxHosts, renderProxmoxHost } from '../proxmox.js';
 
 export function renderPve(root, { go }) {
   root.innerHTML = `
@@ -39,7 +39,7 @@ export function renderPve(root, { go }) {
       </section>`).join('');
     for (const h of hosts) {
       const sec = root.querySelector(`[data-host="${h.id}"]`);
-      cleanups.push(renderProxmoxTab($('[data-guests]', sec), h.id, { compact: true }));
+      cleanups.push(renderProxmoxHost($('[data-guests]', sec), h.id, { compact: true }));
     }
     drawHeads(hosts);
   }
