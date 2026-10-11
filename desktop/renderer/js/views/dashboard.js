@@ -1,5 +1,5 @@
 import { api, LS } from '../api.js';
-import { icon, esc, el, $, $$, tagHtml, meter, memPct, worstDisk, fmtDuration, osIcon, osLabel, statusHtml, primaryIp, throttle, pveBadge, isPveHost } from '../ui.js';
+import { icon, esc, el, $, $$, tagHtml, meter, memPct, worstDisk, fmtDuration, osIcon, osLabel, statusHtml, primaryIp, throttle, pveBadge, isPveHost, osName, clientIcon } from '../ui.js';
 import { sparkline } from '../charts.js';
 import { addClientDialog } from './settings.js';
 
@@ -76,7 +76,7 @@ export function renderDashboard(root, { go }) {
       const hosts = visible.filter(isPveHost);
       const rest = visible.filter((a) => !isPveHost(a));
       grid.innerHTML = hosts.length
-        ? `<div class="dash-group pve">${icon('server', 'sm')}Proxmox-Server<a href="#/proxmox">VMs &amp; Container →</a></div>${hosts.map(card).join('')}`
+        ? `<div class="dash-group">${icon('server', 'sm')}Proxmox-Server<a href="#/proxmox">VMs &amp; Container →</a></div>${hosts.map(card).join('')}`
           + (rest.length ? `<div class="dash-group">${icon('monitor', 'sm')}Clients</div>${rest.map(card).join('')}` : '')
         : rest.map(card).join('');
       $$('.client-card', grid).forEach((c) => (c.onclick = () => go(`#/client/${c.dataset.id}`)));
@@ -98,12 +98,12 @@ export function renderDashboard(root, { go }) {
     const disk = worstDisk(m);
     const mp = memPct(m);
     const alerts = (a.alerts || []).filter((x) => x.kind !== 'offline');
-    return `<div class="card client-card ${a.online ? '' : 'offline'} ${isPveHost(a) ? 'pve-host' : ''}" data-id="${a.id}">
+    return `<div class="card client-card ${a.online ? '' : 'offline'}" data-id="${a.id}">
       <div class="cc-head">
         <div class="grow">
           <div class="cc-name">${esc(a.name)}</div>
           ${pveBadge(a) ? `<div style="margin-top:5px">${pveBadge(a)}</div>` : ''}
-          <div class="cc-sub"><span class="os">${osIcon(a.platform)}${esc(a.os || osLabel(a.platform))}</span></div>
+          <div class="cc-sub"><span class="os">${clientIcon(a)}${esc(osName(a))}</span></div>
           ${a.tags?.length ? `<div class="tag-row" style="margin-top:8px">${a.tags.map((t) => tagHtml(t, { small: true })).join('')}</div>` : ''}
         </div>
         ${statusHtml(a).replace(/Online · \d+ Warnung(en)?/, 'Online')}

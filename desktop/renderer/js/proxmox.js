@@ -54,14 +54,14 @@ function popupMenu(anchor, items, onPick) {
 function consoleFrame(g, extraBar = '') {
   const overlay = el(`<div class="console-overlay">
     <div class="console-bar">
+      <button class="btn sm" data-close title="Konsole schließen">${icon('back', 'sm')}Schließen</button>
       <span class="dot" data-dot></span>
       <div class="console-title"><b>${esc(g.label || g.name || `${kind(g.type)} ${g.vmid}`)}</b><span class="muted">${kind(g.type)} ${g.vmid}${g.hostName ? ` · ${esc(g.hostName)}` : ''}</span></div>
       <span class="muted console-status" data-status>Verbinde ...</span>
       <span class="spacer"></span>
       ${extraBar}
-      <button class="btn sm" data-power title="Proxmox-Aktionen">${icon('power', 'sm')}</button>
-      <button class="btn sm" data-full title="Vollbild">${icon('monitor', 'sm')}Vollbild</button>
-      <button class="btn sm" data-close title="Konsole schließen">${icon('x', 'sm')}Schließen</button>
+      <button class="btn sm icon-only" data-full title="Vollbild an/aus">${icon('monitor', 'sm')}</button>
+      <button class="btn sm icon-only" data-power title="Proxmox: Starten, Herunterfahren, Neustart ...">${icon('power', 'sm')}</button>
     </div>
     <div class="console-screen" data-screen></div>
   </div>`);
@@ -90,7 +90,7 @@ async function openVmConsole(g) {
     </select>
     <button class="btn sm" data-paste title="Text in die VM tippen lassen">${icon('copy', 'sm')}Text einfügen</button>
     <button class="btn sm" data-cad>Strg+Alt+Entf</button>
-    <button class="btn sm" data-scale title="Bild an das Fenster anpassen oder 1:1 anzeigen">${icon('grid', 'sm')}<span>Anpassen</span></button>`);
+    <button class="btn sm" data-scale title="Bild an das Fenster anpassen oder in Originalgröße (1:1) anzeigen">${icon('grid', 'sm')}<span>Anpassen</span></button>`);
 
   const url = api.server.replace(/^http/, 'ws') + `/ws/console?token=${encodeURIComponent(api.token)}&sid=${encodeURIComponent(info.sid)}`;
   const rfb = new RFB(screen, url, { credentials: info.password ? { password: info.password } : undefined });

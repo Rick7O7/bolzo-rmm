@@ -28,7 +28,7 @@ export function renderPve(root, { go }) {
     box.innerHTML = hosts.map((h) => `
       <section class="pve-section" data-host="${h.id}">
         <div class="pve-head">
-          <div class="detail-icon pve">${icon('server')}</div>
+          <div class="detail-icon">${icon('server')}</div>
           <div class="grow" style="min-width:0">
             <div class="row" style="gap:10px;flex-wrap:wrap"><a href="#/client/${h.id}" class="pve-name">${esc(h.name)}</a><span data-status></span></div>
             <div class="muted" style="font-size:12.5px;margin-top:3px">Proxmox VE ${esc(h.info.proxmox.version || '')} · Knoten ${esc(h.info.proxmox.node)}</div>

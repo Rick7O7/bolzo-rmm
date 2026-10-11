@@ -245,10 +245,11 @@ export function exitBadge(r) {
 }
 
 // ---------- Proxmox-Kennzeichen ----------
-// Host: orangefarbenes "Proxmox"-Abzeichen; zugeordnete Gäste: "VM 101 · PROX"
+// Proxmox-Hosts zeigen statt "Debian ..." ihr Proxmox VE; zugeordnete Gäste: "VM 101 · PROX"
 export const isPveHost = (a) => !!a?.info?.proxmox;
+export const osName = (a) => (isPveHost(a) ? `Proxmox VE ${a.info.proxmox.version || ''}`.trim() : a.os || osLabel(a.platform));
+export const clientIcon = (a) => (isPveHost(a) ? icon('server') : osIcon(a.platform));
 export function pveBadge(a, { small = false } = {}) {
-  if (isPveHost(a)) return `<span class="pve-badge host ${small ? 'sm' : ''}" title="Proxmox VE ${esc(a.info.proxmox.version || '')}">${icon('server')}Proxmox</span>`;
   if (a?.pve) return `<span class="pve-badge guest ${small ? 'sm' : ''}" title="Läuft auf ${esc(a.pve.hostName)}">${a.pve.type === 'lxc' ? 'CT' : 'VM'} ${a.pve.vmid} · ${esc(a.pve.hostName)}</span>`;
   return '';
 }
