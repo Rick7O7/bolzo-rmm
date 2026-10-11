@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import {
   icon, esc, el, $, $$, tagHtml, meter, memPct, fmtBytes, fmtRate, fmtDuration, fmtTime, fmtAgo, osIcon, osLabel,
-  statusHtml, toast, confirmDialog, promptDialog, enableTabIndent, throttle, exitBadge,
+  statusHtml, toast, confirmDialog, promptDialog, enableTabIndent, throttle, exitBadge, pveBadge, isPveHost,
 } from '../ui.js';
 import { lineChart } from '../charts.js';
 import { RemoteTerminal } from '../terminal.js';
@@ -45,10 +45,10 @@ export function renderClient(root, { go, params }) {
     if (!a) return;
     const head = $('[data-head]', root);
     head.innerHTML = `
-      <div class="detail-icon">${osIcon(a.platform)}</div>
+      <div class="detail-icon ${isPveHost(a) ? 'pve' : ''}">${isPveHost(a) ? icon('server') : osIcon(a.platform)}</div>
       <div class="detail-title grow">
         <h1>${esc(a.name)} <button class="btn ghost sm icon-only" title="Umbenennen" data-rename>${icon('edit', 'sm')}</button></h1>
-        <div class="meta">${statusHtml(a)}<span>${esc(a.os || osLabel(a.platform))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}${a.pve ? `<span class="badge accent" title="Proxmox-Zuordnung">${icon('server')}${a.pve.type === 'lxc' ? 'Container' : 'VM'} ${a.pve.vmid} · ${esc(a.pve.hostName)}</span>` : ''}${a.info?.proxmox ? `<span class="badge accent">${icon('server')}Proxmox VE ${esc(a.info.proxmox.version)}</span>` : ''}</div>
+        <div class="meta">${statusHtml(a)}<span>${esc(a.os || osLabel(a.platform))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}${pveBadge(a)}${a.info?.proxmox ? `<span>Proxmox VE ${esc(a.info.proxmox.version)}</span>` : ''}</div>
         ${a.tags?.length ? `<div class="tag-row" style="margin-top:6px">${a.tags.map((t) => tagHtml(t)).join('')}</div>` : ''}
       </div>
       <div class="btn-group">

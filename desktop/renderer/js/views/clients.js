@@ -1,5 +1,5 @@
 import { api, LS } from '../api.js';
-import { icon, esc, $, $$, tagHtml, memPct, worstDisk, fmtDuration, fmtAgo, osIcon, primaryIp, level, throttle, confirmDialog, toast } from '../ui.js';
+import { icon, esc, $, $$, tagHtml, memPct, worstDisk, fmtDuration, fmtAgo, osIcon, primaryIp, level, throttle, confirmDialog, toast, pveBadge, isPveHost } from '../ui.js';
 import { addClientDialog } from './settings.js';
 import { runScriptDialog } from './scripts.js';
 
@@ -61,13 +61,15 @@ export function renderClients(root, { go }) {
     const all = [...api.agents.values()];
     const tags = [...new Set(all.flatMap((a) => a.tags || []))].sort();
     const tagSel = $('[data-tag]', root);
-    const tagOptions = `<option value="">Alle Tags</option>` + tags.map((t) => `<option ${t === tagFilter ? 'selected' : ''}>${esc(t)}</option>`).join('');
+    const special = [['__pve', 'Nur Proxmox-Hosts'], ['__guest', 'Nur VMs/Container auf Proxmox']];
+    const tagOptions = `<option value="">Alle Tags</option>` + special.map(([v, l]) => `<option value="${v}" ${v === tagFilter ? 'selected' : ''}>${l}</option>`).join('')
+      + tags.map((t) => `<option ${t === tagFilter ? 'selected' : ''}>${esc(t)}</option>`).join('');
     if (tagSel.innerHTML !== tagOptions) tagSel.innerHTML = tagOptions;
 
     const col = COLS.find((c) => c.key === sort.key) || COLS[1];
     const rows = all
-      .filter((a) => !tagFilter || a.tags?.includes(tagFilter))
-      .filter((a) => !query || [a.name, a.hostname, primaryIp(a), a.os, a.publicIp, ...(a.tags || [])].join(' ').toLowerCase().includes(query))
+      .filter((a) => !tagFilter || (tagFilter === '__pve' ? isPveHost(a) : tagFilter === '__guest' ? !!a.pve : a.tags?.includes(tagFilter)))
+      .filter((a) => !query || [a.name, a.hostname, primaryIp(a), a.os, a.publicIp, isPveHost(a) ? 'proxmox' : '', a.pve?.hostName, ...(a.tags || [])].join(' ').toLowerCase().includes(query))
       .sort((a, b) => { const x = col.get(a), y = col.get(b); return (x > y ? 1 : x < y ? -1 : 0) * sort.dir; });
     for (const id of selected) if (!api.agents.has(id)) selected.delete(id);
 
@@ -83,7 +85,7 @@ export function renderClients(root, { go }) {
       return `<tr class="click" data-id="${a.id}">
         <td><input type="checkbox" class="check" data-sel ${selected.has(a.id) ? 'checked' : ''}></td>
         <td><span class="dot ${a.online ? (a.alerts.length ? 'alert' : 'online') : 'offline'}" style="display:inline-block"></span></td>
-        <td style="min-width:260px"><div style="font-weight:500">${esc(a.name)}</div>${a.tags?.length ? `<div class="tag-row" style="gap:4px;margin-top:5px">${a.tags.map((x) => tagHtml(x, { small: true })).join('')}</div>` : ''}</td>
+        <td style="min-width:260px"><div class="row" style="gap:8px;flex-wrap:wrap"><span style="font-weight:500">${esc(a.name)}</span>${pveBadge(a, { small: true })}</div>${a.tags?.length ? `<div class="tag-row" style="gap:4px;margin-top:5px">${a.tags.map((x) => tagHtml(x, { small: true })).join('')}</div>` : ''}</td>
         <td><span class="os">${osIcon(a.platform)}${esc(a.os)}</span></td>
         <td class="mono">${esc(primaryIp(a))}</td>
         <td>${a.online ? mini(m?.cpu, '', t.cpu) : '<span class="muted">–</span>'}</td>

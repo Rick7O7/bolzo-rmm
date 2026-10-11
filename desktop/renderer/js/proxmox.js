@@ -338,7 +338,7 @@ const statusBadge = (s) => (s === 'running'
   : s === 'stopped' ? `<span class="badge">aus</span>` : `<span class="badge warning">${esc(s || '?')}</span>`);
 
 // ---------- Tab "Proxmox" beim Host ----------
-export function renderProxmoxTab(body, hostId) {
+export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
   const host = () => api.agents.get(hostId);
   body.innerHTML = `
     <div class="toolbar">
@@ -351,7 +351,7 @@ export function renderProxmoxTab(body, hostId) {
       <th>ID</th><th>Name</th><th>Typ</th><th>Status</th><th class="r">CPU</th><th class="r">RAM</th><th>Laufzeit</th><th>BOLZO-Client</th><th></th>
     </tr></thead><tbody><tr><td colspan="9"><div class="empty">Lade ...</div></td></tr></tbody></table></div>`;
   const p = host().info.proxmox;
-  $('[data-ver]', body).textContent = `Proxmox VE ${p.version || ''} · Knoten ${p.node}`;
+  $('[data-ver]', body).textContent = compact ? '' : `Proxmox VE ${p.version || ''} · Knoten ${p.node}`;
   let guests = [];
   let timer = null;
 

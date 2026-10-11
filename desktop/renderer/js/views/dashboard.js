@@ -1,5 +1,5 @@
 import { api, LS } from '../api.js';
-import { icon, esc, el, $, $$, tagHtml, meter, memPct, worstDisk, fmtDuration, osIcon, osLabel, statusHtml, primaryIp, throttle } from '../ui.js';
+import { icon, esc, el, $, $$, tagHtml, meter, memPct, worstDisk, fmtDuration, osIcon, osLabel, statusHtml, primaryIp, throttle, pveBadge, isPveHost } from '../ui.js';
 import { sparkline } from '../charts.js';
 import { addClientDialog } from './settings.js';
 
@@ -45,7 +45,8 @@ export function renderDashboard(root, { go }) {
   markSeg();
 
   function draw() {
-    const agents = [...api.agents.values()].sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name));
+    // Proxmox-Hosts zuerst – an ihnen hängen die VMs
+    const agents = [...api.agents.values()].sort((a, b) => (b.online - a.online) || (isPveHost(b) - isPveHost(a)) || a.name.localeCompare(b.name));
     const online = agents.filter((a) => a.online);
     const withAlerts = agents.filter((a) => a.online && a.alerts.length);
     const avgCpu = online.length ? online.reduce((s, a) => s + (a.metrics?.cpu || 0), 0) / online.length : null;
@@ -62,7 +63,7 @@ export function renderDashboard(root, { go }) {
       if (filter === 'offline' && a.online) return false;
       if (filter === 'alert' && !(a.online && a.alerts.length)) return false;
       if (!query) return true;
-      return [a.name, a.hostname, primaryIp(a), a.os, ...(a.tags || [])].join(' ').toLowerCase().includes(query);
+      return [a.name, a.hostname, primaryIp(a), a.os, isPveHost(a) ? 'proxmox' : '', a.pve?.hostName, ...(a.tags || [])].join(' ').toLowerCase().includes(query);
     });
 
     const grid = $('[data-grid]', root);
@@ -72,7 +73,12 @@ export function renderDashboard(root, { go }) {
     } else if (!visible.length) {
       grid.innerHTML = `<div class="card empty" style="grid-column:1/-1">${icon('search')}<h3>Keine Treffer</h3><div>Filter oder Suche anpassen.</div></div>`;
     } else {
-      grid.innerHTML = visible.map(card).join('');
+      const hosts = visible.filter(isPveHost);
+      const rest = visible.filter((a) => !isPveHost(a));
+      grid.innerHTML = hosts.length
+        ? `<div class="dash-group pve">${icon('server', 'sm')}Proxmox-Server<a href="#/proxmox">VMs &amp; Container →</a></div>${hosts.map(card).join('')}`
+          + (rest.length ? `<div class="dash-group">${icon('monitor', 'sm')}Clients</div>${rest.map(card).join('')}` : '')
+        : rest.map(card).join('');
       $$('.client-card', grid).forEach((c) => (c.onclick = () => go(`#/client/${c.dataset.id}`)));
     }
 
@@ -92,10 +98,11 @@ export function renderDashboard(root, { go }) {
     const disk = worstDisk(m);
     const mp = memPct(m);
     const alerts = (a.alerts || []).filter((x) => x.kind !== 'offline');
-    return `<div class="card client-card ${a.online ? '' : 'offline'}" data-id="${a.id}">
+    return `<div class="card client-card ${a.online ? '' : 'offline'} ${isPveHost(a) ? 'pve-host' : ''}" data-id="${a.id}">
       <div class="cc-head">
         <div class="grow">
           <div class="cc-name">${esc(a.name)}</div>
+          ${pveBadge(a) ? `<div style="margin-top:5px">${pveBadge(a)}</div>` : ''}
           <div class="cc-sub"><span class="os">${osIcon(a.platform)}${esc(a.os || osLabel(a.platform))}</span></div>
           ${a.tags?.length ? `<div class="tag-row" style="margin-top:8px">${a.tags.map((t) => tagHtml(t, { small: true })).join('')}</div>` : ''}
         </div>

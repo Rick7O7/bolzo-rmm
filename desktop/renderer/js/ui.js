@@ -244,6 +244,15 @@ export function exitBadge(r) {
     : `<span class="badge critical">${icon('alert')}Exit ${r.exitCode}${dur}</span>`;
 }
 
+// ---------- Proxmox-Kennzeichen ----------
+// Host: orangefarbenes "Proxmox"-Abzeichen; zugeordnete Gäste: "VM 101 · PROX"
+export const isPveHost = (a) => !!a?.info?.proxmox;
+export function pveBadge(a, { small = false } = {}) {
+  if (isPveHost(a)) return `<span class="pve-badge host ${small ? 'sm' : ''}" title="Proxmox VE ${esc(a.info.proxmox.version || '')}">${icon('server')}Proxmox</span>`;
+  if (a?.pve) return `<span class="pve-badge guest ${small ? 'sm' : ''}" title="Läuft auf ${esc(a.pve.hostName)}">${a.pve.type === 'lxc' ? 'CT' : 'VM'} ${a.pve.vmid} · ${esc(a.pve.hostName)}</span>`;
+  return '';
+}
+
 // ---------- Tags ----------
 // Jeder Tag-Name bekommt dauerhaft dieselbe Farbe (feste Reihenfolge, per Hash zugeordnet)
 const TAG_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#22a03a', '#9085e9', '#e66767'];

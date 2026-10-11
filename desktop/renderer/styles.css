@@ -329,3 +329,28 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .console-screen.term-host { padding: 8px; background: #0b0b0c; }
 .link-client { display: inline-flex; align-items: center; gap: 7px; color: var(--text); text-decoration: none; }
 .link-client:hover { text-decoration: underline; }
+
+/* ---------- Proxmox-Kennzeichen ---------- */
+:root { --pve: #e57000; }
+.pve-badge { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 6px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pve-badge .icon { width: 13px; height: 13px; }
+.pve-badge.host { color: #ffb066; background: rgba(229, 112, 0, 0.16); border: 1px solid rgba(229, 112, 0, 0.45); }
+.pve-badge.guest { color: var(--text-2); background: var(--surface-3); border: 1px solid var(--border-strong); font-weight: 500; }
+.pve-badge.sm { height: 19px; font-size: 11px; padding: 0 6px; }
+.client-card.pve-host { border-color: rgba(229, 112, 0, 0.55); box-shadow: inset 0 3px 0 var(--pve); }
+.client-card.pve-host:hover { border-color: var(--pve); }
+.detail-icon.pve { color: var(--pve); border-color: rgba(229, 112, 0, 0.5); background: rgba(229, 112, 0, 0.1); }
+
+/* ---------- Bereich Proxmox ---------- */
+.dash-group { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 6px; }
+.dash-group:first-child { margin-top: 0; }
+.dash-group.pve { color: #ffb066; }
+.dash-group a { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--muted); text-decoration: none; }
+.dash-group a:hover { color: var(--text); }
+.pve-section { margin-bottom: 28px; }
+.pve-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+.pve-name { font-size: 18px; font-weight: 650; color: var(--text); text-decoration: none; }
+.pve-name:hover { text-decoration: underline; }
+.pve-meters { display: flex; gap: 18px; min-width: 260px; }
+.pve-meters > * { flex: 1; min-width: 120px; }
+.badge[hidden] { display: none; }

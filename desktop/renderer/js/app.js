@@ -6,23 +6,26 @@ import { renderClient } from './views/client.js';
 import { renderScripts } from './views/scripts.js';
 import { renderHistory } from './views/history.js';
 import { renderSettings } from './views/settings.js';
+import { renderPve } from './views/pve.js';
 import { updates, initUpdates } from './updates.js';
 
 const app = $('#app');
 const NAV = [
   { href: '#/dashboard', label: 'Dashboard', icon: 'grid' },
   { href: '#/clients', label: 'Clients', icon: 'monitor' },
+  { href: '#/proxmox', label: 'Proxmox', icon: 'server' },
   { href: '#/scripts', label: 'Skripte', icon: 'code' },
   { href: '#/history', label: 'Verlauf', icon: 'clock' },
   { href: '#/settings', label: 'Einstellungen', icon: 'sliders', bottom: true }, // unten über der Verbindungsanzeige
 ];
-const navItem = (n) => `<a class="nav-item" href="${n.href}" style="text-decoration:none">${icon(n.icon)}${n.label}${n.href === '#/clients' ? '<span class="badge" data-online></span>' : ''}</a>`;
+const navItem = (n) => `<a class="nav-item" href="${n.href}" style="text-decoration:none">${icon(n.icon)}${n.label}${n.href === '#/clients' ? '<span class="badge" data-online></span>' : ''}${n.href === '#/proxmox' ? '<span class="badge" data-pvecount hidden></span>' : ''}</a>`;
 const ROUTES = {
   dashboard: renderDashboard,
   clients: renderClients,
   client: renderClient,
   scripts: renderScripts,
   history: renderHistory,
+  proxmox: renderPve,
   settings: renderSettings,
 };
 
@@ -93,6 +96,12 @@ function updateBadge() {
   if (!b) return;
   const all = [...api.agents.values()];
   b.textContent = `${all.filter((a) => a.online).length}/${all.length}`;
+  const p = $('[data-pvecount]');
+  const hosts = all.filter((a) => a.info?.proxmox);
+  if (p) {
+    p.hidden = !hosts.length;
+    p.textContent = `${hosts.filter((a) => a.online).length}/${hosts.length}`;
+  }
 }
 
 // Hinweis unten in der Seitenleiste, sobald irgendein Update bereitsteht
