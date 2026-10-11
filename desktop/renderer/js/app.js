@@ -14,8 +14,9 @@ const NAV = [
   { href: '#/clients', label: 'Clients', icon: 'monitor' },
   { href: '#/scripts', label: 'Skripte', icon: 'code' },
   { href: '#/history', label: 'Verlauf', icon: 'clock' },
-  { href: '#/settings', label: 'Einstellungen', icon: 'sliders' },
+  { href: '#/settings', label: 'Einstellungen', icon: 'sliders', bottom: true }, // unten über der Verbindungsanzeige
 ];
+const navItem = (n) => `<a class="nav-item" href="${n.href}" style="text-decoration:none">${icon(n.icon)}${n.label}${n.href === '#/clients' ? '<span class="badge" data-online></span>' : ''}</a>`;
 const ROUTES = {
   dashboard: renderDashboard,
   clients: renderClients,
@@ -67,9 +68,10 @@ function showShell() {
     <div class="shell">
       <aside class="sidebar">
         <div class="brand"><img class="brand-mark" src="../build/icon.png" alt=""><span class="wordmark">BOLZO <span>RMM</span></span></div>
-        <nav class="nav">${NAV.map((n) => `<a class="nav-item" href="${n.href}" style="text-decoration:none">${icon(n.icon)}${n.label}${n.href === '#/clients' ? '<span class="badge" data-online></span>' : ''}</a>`).join('')}</nav>
+        <nav class="nav">${NAV.filter((n) => !n.bottom).map(navItem).join('')}</nav>
         <div class="sidebar-foot">
           <a class="update-pill" href="#/settings" data-updpill hidden>${icon('download', 'sm')}<span></span></a>
+          <nav class="nav nav-bottom">${NAV.filter((n) => n.bottom).map(navItem).join('')}</nav>
           <div class="conn"><span class="dot" data-conndot></span><div style="min-width:0"><div data-connlabel>Verbinde ...</div><div class="host">${esc(api.server.replace(/^https?:\/\//, ''))}</div></div></div>
         </div>
       </aside>

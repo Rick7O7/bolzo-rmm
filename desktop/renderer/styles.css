@@ -314,3 +314,4 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .audit-tbl tr.failed td:first-child { box-shadow: inset 3px 0 0 var(--critical-text); }
 .tbl tr.day-row td { background: var(--surface-2); color: var(--text-2); font-size: 12px; font-weight: 600; padding: 7px 14px; position: sticky; top: 37px; z-index: 1; }
 .tbl tbody tr.day-row:hover td { background: var(--surface-2); }
+.nav.nav-bottom { margin-top: 0; }
