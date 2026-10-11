@@ -352,47 +352,70 @@ const statusBadge = (s) => (s === 'running'
   : s === 'stopped' ? `<span class="badge">aus</span>` : `<span class="badge warning">${esc(s || '?')}</span>`);
 
 // ---------- Tab "Proxmox" beim Host ----------
+// Gäste-Tabelle für einen Host oder – mit einer Liste von Host-IDs – für mehrere Server zusammen
 export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
-  const host = () => api.agents.get(hostId);
+  const hostIds = Array.isArray(hostId) ? hostId : [hostId];
+  const multi = Array.isArray(hostId);
+  const hostOf = (id) => api.agents.get(id);
+  const cols = multi ? 13 : 12;
+  let filter = '';
   body.innerHTML = `
     <div class="toolbar">
+      <div class="search" style="width:240px">${icon('search', 'sm')}<input class="input" placeholder="Name, ID, IP, Tag ..." data-gfilter></div>
       <span class="muted" style="font-size:13px" data-ver></span>
       <span class="spacer grow"></span>
       <button class="btn" data-auto title="Clients anhand der MAC-Adresse ihrer VM/ihrem Container zuordnen">${icon('link', 'sm')}Automatisch zuordnen</button>
       <button class="btn" data-refresh>${icon('refresh', 'sm')}Aktualisieren</button>
     </div>
     <div class="card table-wrap"><table class="tbl"><thead><tr>
-      <th>ID</th><th>Name</th><th>Typ</th><th>Status</th><th>IP-Adresse</th><th>CPU</th><th>RAM</th><th>Disk</th><th>Netzwerk</th><th>Laufzeit</th><th>BOLZO-Client</th><th></th>
-    </tr></thead><tbody><tr><td colspan="12"><div class="empty">Lade ...</div></td></tr></tbody></table></div>`;
-  const p = host().info.proxmox;
-  $('[data-ver]', body).textContent = compact ? '' : `Proxmox VE ${p.version || ''} · Knoten ${p.node}`;
+      <th>ID</th><th>Name</th>${multi ? '<th>Server</th>' : ''}<th>Typ</th><th>Status</th><th>IP-Adresse</th><th>CPU</th><th>RAM</th><th>Disk</th><th>Netzwerk</th><th>Laufzeit</th><th>BOLZO-Client</th><th></th>
+    </tr></thead><tbody><tr><td colspan="${cols}"><div class="empty">Lade ...</div></td></tr></tbody></table></div>`;
+  const p = hostOf(hostIds[0])?.info?.proxmox;
+  $('[data-ver]', body).textContent = compact || multi || !p ? '' : `Proxmox VE ${p.version || ''} · Knoten ${p.node}`;
   let guests = [];
+  let failed = [];
   let timer = null;
 
   async function load() {
-    if (!host()?.online) {
-      $('tbody', body).innerHTML = `<tr><td colspan="12"><div class="empty">${icon('server')}<h3>Host ist offline</h3></div></td></tr>`;
+    const online = hostIds.filter((id) => hostOf(id)?.online);
+    if (!online.length) {
+      $('tbody', body).innerHTML = `<tr><td colspan="${cols}"><div class="empty">${icon('server')}<h3>${multi ? 'Kein Proxmox-Server online' : 'Host ist offline'}</h3></div></td></tr>`;
       return;
     }
-    try {
-      ({ guests } = await api.get(`/api/agents/${hostId}/pve/guests`));
-    } catch (e) {
-      $('tbody', body).innerHTML = `<tr><td colspan="12"><div class="empty err-text">${esc(e.message)}</div></td></tr>`;
+    const res = await Promise.allSettled(online.map((id) => api.get(`/api/agents/${id}/pve/guests`)));
+    failed = hostIds.filter((id) => !online.includes(id)).map((id) => `${hostOf(id)?.name || id}: offline`);
+    guests = [];
+    res.forEach((r, i) => {
+      const h = hostOf(online[i]);
+      if (r.status === 'fulfilled') guests.push(...r.value.guests.map((g) => ({ ...g, hostId: h.id, hostName: h.name })));
+      else failed.push(`${h.name}: ${r.reason.message}`);
+    });
+    if (!guests.length && failed.length && !multi) {
+      $('tbody', body).innerHTML = `<tr><td colspan="${cols}"><div class="empty err-text">${esc(failed.join(' · '))}</div></td></tr>`;
       return;
     }
+    if (multi) guests.sort((a, b) => a.hostName.localeCompare(b.hostName) || a.vmid - b.vmid);
+    draw();
+  }
+
+  function draw() {
     const t = api.settings.thresholds;
-    $('tbody', body).innerHTML = guests.filter((g) => !g.template).map((g) => {
+    const q = filter.trim().toLowerCase();
+    const shown = guests.filter((g) => !g.template && (!q || [g.vmid, g.name, g.hostName, ...(g.ips || []), ...(g.tags || []), api.agents.get(g.agentId)?.name].join(' ').toLowerCase().includes(q)));
+    const note = multi && failed.length ? `<tr><td colspan="${cols}" class="pve-failed">${icon('alert', 'sm')}${esc(failed.join(' · '))}</td></tr>` : '';
+    $('tbody', body).innerHTML = note + shown.map((g) => {
       const a = g.agentId && api.agents.get(g.agentId);
       const run = g.status === 'running';
       const osText = a ? osShort(a) : OSTYPES[g.ostype] ?? g.ostype ?? '';
       const memPct = g.maxmem ? (100 * g.mem) / g.maxmem : null;
       const diskPct = g.type === 'lxc' && g.maxdisk ? (100 * g.disk) / g.maxdisk : null; // VMs melden keine Belegung
-      return `<tr data-g="${g.type}:${g.vmid}" class="pve-row">
+      return `<tr data-g="${g.hostId}:${g.type}:${g.vmid}" class="pve-row">
         <td class="num">${g.vmid}</td>
         <td class="pve-name-cell" ${g.description ? `title="${esc(g.description)}"` : ''}>
           <div class="n">${esc(g.name)}</div>
           ${g.tags?.length ? `<div class="sub">${g.tags.map((x) => tagHtml(x, { small: true })).join('')}</div>` : g.description ? `<div class="sub muted">${esc(g.description)}</div>` : ''}
         </td>
+        ${multi ? `<td class="pve-host-cell">${esc(g.hostName)}</td>` : ''}
         <td><div>${kind(g.type)}</div>${osText ? `<div class="sub muted">${esc(osText)}</div>` : ''}</td>
         <td><div>${statusBadge(g.status)}</div><div class="sub muted">${[g.onboot ? 'Autostart' : '', g.lock ? `gesperrt: ${esc(g.lock)}` : ''].filter(Boolean).join(' · ')}</div></td>
         <td class="mono pve-ips">${g.ips?.length ? g.ips.map((ip) => `<div>${esc(ip)}</div>`).join('') : '<span class="muted">–</span>'}</td>
@@ -408,13 +431,14 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
           <button class="btn sm icon-only" data-k="settings" title="Einstellungen, Netzwerk, Snapshots, Backups">${icon('sliders', 'sm')}</button>
           <button class="btn sm icon-only" data-k="more" title="Weitere Aktionen">⋯</button>
         </td></tr>`;
-    }).join('') || `<tr><td colspan="12"><div class="empty">Keine VMs oder Container</div></td></tr>`;
+    }).join('') || `<tr><td colspan="${cols}"><div class="empty">${q ? 'Kein Gast passt zum Filter' : 'Keine VMs oder Container'}</div></td></tr>`;
   }
+  $('[data-gfilter]', body).addEventListener('input', (e) => { filter = e.target.value; draw(); });
 
   const guestOf = (tr) => {
-    const [type, vmid] = tr.dataset.g.split(':');
-    const g = guests.find((x) => x.type === type && x.vmid === Number(vmid));
-    return { ...g, hostId, hostName: host().name, label: g.name };
+    const [hid, type, vmid] = tr.dataset.g.split(':');
+    const g = guests.find((x) => x.hostId === hid && x.type === type && x.vmid === Number(vmid));
+    return { ...g, label: g.name };
   };
   $('tbody', body).onclick = async (e) => {
     const b = e.target.closest('[data-k]');
@@ -440,7 +464,7 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
   async function restartAgent(g, btn) {
     if (btn) btn.disabled = true;
     try {
-      await api.post(`/api/agents/${hostId}/pve/restart-agent`, { vmid: g.vmid, type: g.type, name: g.name });
+      await api.post(`/api/agents/${g.hostId}/pve/restart-agent`, { vmid: g.vmid, type: g.type, name: g.name });
       toast(`BOLZO-Agent in ${g.name} wird neu gestartet`);
       setTimeout(load, 5000);
     } catch (e) {
@@ -454,16 +478,16 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     const free = guests.filter((g) => !g.agentId && !g.template);
     const pairs = [];
     for (const a of api.agents.values()) {
-      if (a.id === hostId || a.pve) continue;
+      if (a.info?.proxmox || a.pve) continue;
       const mine = macsOf(a);
       const hits = free.filter((g) => g.macs.some((m) => mine.has(m)));
       if (hits.length === 1) pairs.push([a, hits[0]]);
     }
     if (!pairs.length) return toast('Keine neuen Zuordnungen gefunden (MAC-Adressen passen zu keinem freien Client)');
-    if (!(await confirmDialog({ title: `${pairs.length} Zuordnung(en) übernehmen?`, text: pairs.map(([a, g]) => `<b>${esc(a.name)}</b> → ${kind(g.type)} ${g.vmid} (${esc(g.name)})`).join('<br>'), okText: 'Übernehmen' }))) return;
+    if (!(await confirmDialog({ title: `${pairs.length} Zuordnung(en) übernehmen?`, text: pairs.map(([a, g]) => `<b>${esc(a.name)}</b> → ${kind(g.type)} ${g.vmid} (${esc(g.name)})${multi ? ` auf ${esc(g.hostName)}` : ''}`).join('<br>'), okText: 'Übernehmen' }))) return;
     let ok = 0;
     for (const [a, g] of pairs) {
-      try { await api.patch(`/api/agents/${a.id}`, { pve: { hostId, vmid: g.vmid, type: g.type } }); ok++; } catch (e) { toast(`${a.name}: ${e.message}`, 'err'); }
+      try { await api.patch(`/api/agents/${a.id}`, { pve: { hostId: g.hostId, vmid: g.vmid, type: g.type } }); ok++; } catch (e) { toast(`${a.name}: ${e.message}`, 'err'); }
     }
     toast(`${ok} Client(s) zugeordnet`);
     load();
