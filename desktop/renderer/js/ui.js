@@ -157,7 +157,7 @@ export async function copyText(text) {
 }
 
 // ---------- Modale Dialoge ----------
-export function modal({ title, body, foot = '', wide = false, onClose }) {
+export function modal({ title, body, foot = '', wide = false, onClose, closeOnBackdrop = true }) {
   const back = el(`<div class="modal-back"><div class="modal ${wide ? 'wide' : ''}">
     <div class="modal-head"><h2>${esc(title)}</h2><button class="btn ghost icon-only sm" data-close>${icon('x')}</button></div>
     <div class="modal-body"></div>
@@ -173,7 +173,7 @@ export function modal({ title, body, foot = '', wide = false, onClose }) {
   };
   const onKey = (e) => e.key === 'Escape' && close();
   document.addEventListener('keydown', onKey);
-  back.addEventListener('mousedown', (e) => e.target === back && close());
+  if (closeOnBackdrop) back.addEventListener('mousedown', (e) => e.target === back && close());
   $$('[data-close]', back).forEach((b) => b.addEventListener('click', close));
   document.body.append(back);
   return { el: back, body: bodyEl, close };

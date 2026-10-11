@@ -2,6 +2,7 @@ import { api, LS } from '../api.js';
 import { icon, esc, $, $$, toast, modal, copyText, confirmDialog } from '../ui.js';
 import { renderUpdateCard } from '../updates.js';
 import { renderMigrateCard } from '../migrate.js';
+import { renderTokenCard } from '../tokens.js';
 
 // Ältere Server liefern nur linux/windows ohne Varianten
 const variantsOf = (info) => info.variants || [{ label: '', linux: info.linux, windows: info.windows }];
@@ -47,6 +48,7 @@ export function renderSettings(root, { go }) {
     <div style="display:flex;flex-direction:column;gap:14px;max-width:900px">
       <div class="card" data-updates></div>
       <div class="card" data-migrate-card></div>
+      <div class="card" data-token-card></div>
 
       <div class="card">
         <div class="card-head">${icon('download', 'sm')}<h3>Clients hinzufügen (Install-Skripte)</h3><span class="spacer"></span>
@@ -114,5 +116,6 @@ export function renderSettings(root, { go }) {
   const offUpd = renderUpdateCard($('[data-updates]', root));
   const offConn = api.on('conn', drawConn);
   const offMig = renderMigrateCard($('[data-migrate-card]', root));
+  renderTokenCard($('[data-token-card]', root));
   return () => { offUpd(); offMig(); offConn(); };
 }

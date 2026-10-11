@@ -159,10 +159,56 @@ function validSession(token) {
   return !!s && s.expires > Date.now();
 }
 
+// API-Zugänge (z.B. für die Sprachsteuerung) dürfen nur, was ihre Rechte (scopes) erlauben:
+//   status – Clients und ihren Zustand lesen
+//   power  – Neustart, Herunterfahren, Aufwecken
+const TOKEN_SCOPES = ['status', 'power'];
+
+function apiTokenFor(token) {
+  if (!token || !token.startsWith('bzr_')) return null;
+  const hash = sha256hex(token);
+  return store.data.apiTokens.find((t) => t.hash === hash) || null;
+}
+
+function bearer(req) {
+  return (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+}
+
 function requireAdmin(req, res, next) {
-  const token = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
-  if (!validSession(token)) return res.status(401).json({ error: 'Nicht angemeldet' });
-  next();
+  const token = bearer(req);
+  if (validSession(token)) return next();
+  if (apiTokenFor(token)) return res.status(403).json({ error: 'Dieser API-Zugang hat dafür keine Berechtigung' });
+  res.status(401).json({ error: 'Nicht angemeldet' });
+}
+
+function requireScope(scope) {
+  return (req, res, next) => {
+    const token = bearer(req);
+    if (validSession(token)) return next();
+    const t = apiTokenFor(token);
+    if (!t) return res.status(401).json({ error: 'Nicht angemeldet' });
+    if (!t.scopes.includes(scope)) return res.status(403).json({ error: 'Dieser API-Zugang hat dafür keine Berechtigung' });
+    req.apiToken = t;
+    if (Date.now() - (t.lastUsed || 0) > 60e3) {
+      t.lastUsed = Date.now();
+      store.save();
+    }
+    next();
+  };
+}
+
+// Aktionen über API-Zugänge im Verlauf festhalten
+function auditApi(req, agent, label) {
+  if (!req.apiToken) return;
+  log(`[api] ${req.apiToken.name}: ${label} -> ${agent.info?.hostname || agent.id}`);
+  store.data.history.unshift({
+    id: crypto.randomUUID(), ts: Date.now(), agentId: agent.id, hostname: agent.name || agent.info?.hostname || agent.id,
+    scriptName: `${req.apiToken.name}: ${label}`, shell: 'api', exitCode: 0, durationMs: 0,
+    output: `Ausgeführt über den API-Zugang „${req.apiToken.name}".`,
+  });
+  store.data.history.length = Math.min(store.data.history.length, 300);
+  store.save();
+  broadcast({ type: 'history' });
 }
 
 app.get('/health', (req, res) => res.json({ ok: true, id: store.data.serverId, agents: Object.keys(store.data.agents).length, online: conns.size }));
@@ -197,7 +243,7 @@ app.post('/api/logout', requireAdmin, (req, res) => {
 });
 
 // ---- Clients --------------------------------------------------------------
-app.get('/api/agents', requireAdmin, (req, res) => {
+app.get('/api/agents', requireScope('status'), (req, res) => {
   res.json(Object.values(store.data.agents).map((a) => summarize(a, true)));
 });
 
@@ -207,7 +253,7 @@ function getAgent(req) {
   return a;
 }
 
-app.get('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
+app.get('/api/agents/:id', requireScope('status'), wrap(async (req, res) => {
   const a = getAgent(req);
   res.json({ ...summarize(a), history: live.get(a.id)?.history || [] });
 }));
@@ -238,10 +284,13 @@ app.delete('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
 }));
 
 const ACTIONS = new Set(['processes', 'kill', 'services', 'service', 'reboot', 'shutdown', 'update', 'uninstall', 'info']);
-app.post('/api/agents/:id/action', requireAdmin, wrap(async (req, res) => {
+const POWER_LABELS = { reboot: 'Neustart', shutdown: 'Herunterfahren' };
+app.post('/api/agents/:id/action', requireScope('power'), wrap(async (req, res) => {
   const a = getAgent(req);
   const { action, params } = req.body || {};
   if (!ACTIONS.has(action)) throw httpError(400, 'Unbekannte Aktion');
+  if (req.apiToken && !POWER_LABELS[action]) throw httpError(403, 'Dieser API-Zugang darf nur neu starten und herunterfahren');
+  auditApi(req, a, POWER_LABELS[action]);
   log(`[action] ${action} -> ${a.info?.hostname || a.id}`);
   const result = await agentRequest(a.id, action, params || {}, action === 'services' || action === 'processes' ? 45000 : 30000);
   if (action === 'info') {
@@ -274,8 +323,9 @@ function sendMagicPacket(macs) {
 }
 
 const subnet24 = (ip) => ip.split('.').slice(0, 3).join('.');
-app.post('/api/agents/:id/wake', requireAdmin, wrap(async (req, res) => {
+app.post('/api/agents/:id/wake', requireScope('power'), wrap(async (req, res) => {
   const a = getAgent(req);
+  auditApi(req, a, 'Aufwecken');
   const ifaces = (a.info?.interfaces || []).filter((i) => i.mac && i.mac !== '00:00:00:00:00:00');
   if (!ifaces.length) throw httpError(400, 'Keine MAC-Adresse für diesen Client bekannt');
   const macs = [...new Set(ifaces.map((i) => i.mac))];
@@ -535,6 +585,30 @@ function enrollInfo(req) {
 }
 
 app.get('/api/enroll', requireAdmin, (req, res) => res.json(enrollInfo(req)));
+
+// ---- API-Zugänge -----------------------------------------------------------
+const publicToken = (t) => ({ id: t.id, name: t.name, scopes: t.scopes, createdAt: t.createdAt, lastUsed: t.lastUsed || null });
+
+app.get('/api/tokens', requireAdmin, (req, res) => res.json(store.data.apiTokens.map(publicToken)));
+
+app.post('/api/tokens', requireAdmin, wrap(async (req, res) => {
+  const name = String(req.body?.name || '').trim().slice(0, 60);
+  const scopes = [...new Set((req.body?.scopes || []).filter((s) => TOKEN_SCOPES.includes(s)))];
+  if (!name) throw httpError(400, 'Name fehlt');
+  if (!scopes.length) throw httpError(400, 'Mindestens ein Recht auswählen');
+  const token = 'bzr_' + crypto.randomBytes(32).toString('base64url');
+  const t = { id: crypto.randomUUID(), name, scopes, hash: sha256hex(token), createdAt: Date.now() };
+  store.data.apiTokens.push(t);
+  store.save();
+  log(`[api] Zugang angelegt: ${name} (${scopes.join(', ')})`);
+  res.json({ ...publicToken(t), token }); // Klartext nur dieses eine Mal
+}));
+
+app.delete('/api/tokens/:tid', requireAdmin, (req, res) => {
+  store.data.apiTokens = store.data.apiTokens.filter((t) => t.id !== req.params.tid);
+  store.save();
+  res.json({ ok: true });
+});
 
 // Agents auf eine andere Server-Adresse umziehen. Jeder Agent probiert die Adressen
 // der Reihe nach (öffentlich zuerst, dann Heimnetz) und wechselt nur, wenn dort

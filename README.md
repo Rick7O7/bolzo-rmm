@@ -117,6 +117,28 @@ npm version minor             # bzw. patch – Dashboard-Version erhöhen
 npm run release               # baut die Setup-EXE und legt das GitHub-Release an
 ```
 
+## Sprachsteuerung per Telefon (optional)
+
+Eine ungenutzte Festnetznummer der FRITZ!Box anrufen, PIN eintippen und z.B. „Fahr SRV-MC herunter"
+sagen. Ein kleiner Dienst auf einem Gerät **im FRITZ!Box-Netz** (Raspberry Pi 5 oder Mini-PC; ein Pi 4 geht,
+braucht aber spürbar länger für die Antwort) meldet sich als IP-Telefon an, erkennt die Sprache lokal (Whisper), lässt Claude den
+Befehl verstehen und führt ihn über einen eingeschränkten API-Zugang aus. Jede Aktion wird vorher per
+Taste 1 bestätigt. Am Telefon gehen nur Status, Neustart, Herunterfahren und Aufwecken.
+
+1. **FRITZ!Box:** Telefonie → Telefoniegeräte → Neues Gerät → Telefon → „LAN/WLAN (IP-Telefon)";
+   Benutzername + Kennwort vergeben; ausgehend und ankommend **nur** die ungenutzte Nummer.
+   Bei allen anderen Telefonen diese Nummer abwählen. „Anmeldung aus dem Internet" bleibt aus.
+2. **App:** Einstellungen → API-Zugänge → Zugang „Telefon" mit beiden Rechten anlegen, Schlüssel kopieren.
+3. **Gerät zu Hause:**
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Rick7O7/bolzo-rmm/main/voice/install-voice.sh | sudo bash
+   ```
+
+4. `/etc/bolzo-voice/voice.env` ausfüllen (FRITZ!Box-Zugang, `RMM_TOKEN`, eigener
+   `ANTHROPIC_API_KEY` von console.anthropic.com, `PIN`), dann `systemctl restart bolzo-voice`.
+   Logs: `journalctl -u bolzo-voice -f`.
+
 ## Sicherheit
 
 - Wer das Admin-Passwort hat, hat **Root/SYSTEM-Zugriff auf alle Clients**. Starkes Passwort verwenden.

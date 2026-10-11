@@ -69,6 +69,7 @@ class Store {
     }
     data.agents ??= {};
     data.sessions ??= {};
+    data.apiTokens ??= []; // eingeschränkte Zugänge, z.B. für die Telefon-Sprachsteuerung
     data.history ??= [];
     data.settings ??= {};
     data.settings.thresholds ??= { cpu: 90, mem: 90, disk: 90 };
