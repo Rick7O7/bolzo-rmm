@@ -127,7 +127,7 @@ export function renderClients(root, { go }) {
         <td><input type="checkbox" class="check" data-sel ${selected.has(a.id) ? 'checked' : ''}></td>
         <td><div class="nmc"><span class="nm-ic">${clientIcon(a)}</span><div class="nm-t"><div class="n">${esc(a.name)}</div>${a.pve ? `<div class="s">${pveLine(a)}</div>` : ''}</div></div></td>
         <td><span class="state"><span class="dot ${cls}"></span>${label}</span></td>
-        <td class="cl-tags">${(a.tags || []).map((x) => tagHtml(x, { small: true })).join('')}</td>
+        <td class="cl-tags c-tags">${(a.tags || []).map((x) => tagHtml(x, { small: true })).join('')}</td>
         <td class="cl-os" title="${esc(osName(a))}">${esc(osShort(a))}</td>
         <td class="muted">${esc(primaryIp(a))}</td>
         <td>${a.online ? bar(m?.cpu, t.cpu) : '<span class="muted">–</span>'}</td>
@@ -157,7 +157,7 @@ export function renderClients(root, { go }) {
     $('[data-close]', panel).onclick = closePanel;
     $('[data-open]', panel).onclick = () => go(`#/client/${id}`);
     chart?.destroy?.();
-    chart = lineChart($('[data-chart]', panel), { height: 120 });
+    chart = lineChart($('[data-chart]', panel), { height: 170 });
     const loadHist = () => api.get(`/api/agents/${id}`).then((d) => current === id && chart.update(d.history || [])).catch(() => {});
     loadHist();
     clearInterval(histTimer);
@@ -227,6 +227,7 @@ export function renderClients(root, { go }) {
   }
 
   const view = $('.cl-layout', root); // nicht am gemeinsamen Seitencontainer anmelden
+  let lastClick = { id: null, t: 0 };
   view.addEventListener('click', (e) => {
     const st = e.target.closest('[data-s]');
     if (st) { state = st.dataset.s; return draw(); }
@@ -253,6 +254,14 @@ export function renderClients(root, { go }) {
       else selected.delete(tr.dataset.id);
       return draw();
     }
+    // Doppelklick selbst erkennen: der erste Klick zeichnet die Tabelle neu, dadurch
+    // meldet der Browser kein "dblclick" mehr
+    const now = Date.now();
+    if (lastClick.id === tr.dataset.id && now - lastClick.t < 450) {
+      lastClick = { id: null, t: 0 };
+      return go(`#/client/${tr.dataset.id}`);
+    }
+    lastClick = { id: tr.dataset.id, t: now };
     if (current === tr.dataset.id) return closePanel();
     openPanel(tr.dataset.id);
   });

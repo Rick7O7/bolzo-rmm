@@ -633,3 +633,16 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .fs-col.none { background: repeating-linear-gradient(45deg, var(--surface-3) 0 4px, var(--surface-2) 4px 8px); border-color: var(--border-strong); }
 .fs-col.on { outline-color: var(--text); }
 .menu-item .f-ic .icon { width: 15px; height: 15px; }
+
+/* Detail-Panel der Client-Liste: breiter, größere Schrift */
+.cl-panel { width: clamp(380px, 30vw, 520px); padding: 18px; gap: 16px; }
+.cp-ic { width: 48px; height: 48px; border-radius: 12px; }
+.cp-ic svg { width: 22px; height: 22px; }
+.cp-name { font-size: 17px; }
+.cp-state { font-size: 12.5px; margin-top: 3px; }
+.cp-actions .btn { height: 36px; font-size: 13px; }
+.cp-chart { padding: 14px; }
+.cp-kv { grid-template-columns: 130px minmax(0, 1fr); font-size: 13px; gap: 11px 12px; }
+.cp-kv .tbar .tr { width: 110px; }
+.cl-layout.with-panel .ctbl .c-tags { display: none; }
+.cp-actions { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
