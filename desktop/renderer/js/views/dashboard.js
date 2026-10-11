@@ -1,5 +1,5 @@
 import { api, LS } from '../api.js';
-import { icon, esc, el, $, $$, tagHtml, meter, memPct, worstDisk, fmtDuration, osIcon, osLabel, statusHtml, primaryIp, throttle, pveBadge, isPveHost, osName, clientIcon } from '../ui.js';
+import { icon, esc, el, $, $$, tagHtml, meter, memPct, worstDisk, fmtDuration, osIcon, osLabel, statusHtml, primaryIp, throttle, pveBadge, isPveHost, osName, osShort, clientIcon } from '../ui.js';
 import { sparkline } from '../charts.js';
 import { addClientDialog } from './settings.js';
 
@@ -103,7 +103,7 @@ export function renderDashboard(root, { go }) {
         <div class="grow">
           <div class="cc-name">${esc(a.name)}</div>
           ${pveBadge(a) ? `<div style="margin-top:5px">${pveBadge(a)}</div>` : ''}
-          <div class="cc-sub"><span class="os">${clientIcon(a)}${esc(osName(a))}</span></div>
+          <div class="cc-sub" title="${esc(osName(a))}"><span class="os">${clientIcon(a)}${esc(osShort(a))}</span></div>
           ${a.tags?.length ? `<div class="tag-row" style="margin-top:8px">${a.tags.map((t) => tagHtml(t, { small: true })).join('')}</div>` : ''}
         </div>
         ${statusHtml(a).replace(/Online · \d+ Warnung(en)?/, 'Online')}

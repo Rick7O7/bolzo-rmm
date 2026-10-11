@@ -248,6 +248,14 @@ export function exitBadge(r) {
 // Proxmox-Hosts zeigen statt "Debian ..." ihr Proxmox VE; zugeordnete Gäste: "VM 101 · PROX"
 export const isPveHost = (a) => !!a?.info?.proxmox;
 export const osName = (a) => (isPveHost(a) ? `Proxmox VE ${a.info.proxmox.version || ''}`.trim() : a.os || osLabel(a.platform));
+// Kurzform für Listen: "Windows 11 Pro", "Debian 12", "Ubuntu 24.04.4 LTS", "Proxmox VE 9.2.21"
+export const osShort = (a) => osName(a)
+  .replace(/^Microsoft\s+/, '')
+  .replace(/\s*\(Build \d+\)/, '')
+  .replace(/\s+GNU\/Linux/, '')
+  .replace(/\s*\([a-z]+\)$/i, '');
+// "Container 107 · PROX" für zugeordnete Gäste (als schlichte Textzeile)
+export const pveLine = (a) => (a?.pve ? `${icon('server')}${a.pve.type === 'lxc' ? 'Container' : 'VM'} ${a.pve.vmid} · ${esc(a.pve.hostName)}` : '');
 export const clientIcon = (a) => (isPveHost(a) ? icon('server') : osIcon(a.platform));
 export function pveBadge(a, { small = false } = {}) {
   if (a?.pve) return `<span class="pve-badge guest ${small ? 'sm' : ''}" title="Läuft auf ${esc(a.pve.hostName)}">${a.pve.type === 'lxc' ? 'CT' : 'VM'} ${a.pve.vmid} · ${esc(a.pve.hostName)}</span>`;

@@ -1,12 +1,13 @@
 import { api, LS } from '../api.js';
-import { icon, esc, $, $$, tagHtml, memPct, worstDisk, fmtDuration, fmtAgo, osIcon, primaryIp, level, throttle, confirmDialog, toast, pveBadge, isPveHost, osName, clientIcon } from '../ui.js';
+import { icon, esc, $, $$, tagHtml, memPct, worstDisk, fmtDuration, fmtAgo, osIcon, primaryIp, level, throttle, confirmDialog, toast, isPveHost, osName, osShort, pveLine, clientIcon } from '../ui.js';
 import { addClientDialog } from './settings.js';
 import { runScriptDialog } from './scripts.js';
 
 const COLS = [
   { key: 'status', label: '', get: (a) => (a.online ? (a.alerts.length ? 1 : 2) : 0) },
   { key: 'name', label: 'Name', get: (a) => a.name.toLowerCase() },
-  { key: 'os', label: 'Betriebssystem', get: (a) => osName(a) },
+  { key: 'tags', label: 'Tags', get: (a) => (a.tags || []).join(',').toLowerCase() || '~' },
+  { key: 'os', label: 'Betriebssystem', get: (a) => osShort(a) },
   { key: 'ip', label: 'IP-Adresse', get: (a) => primaryIp(a).split('.').map((n) => n.padStart(3, '0')).join('.') },
   { key: 'cpu', label: 'CPU', get: (a) => a.metrics?.cpu ?? -1 },
   { key: 'mem', label: 'RAM', get: (a) => memPct(a.metrics) ?? -1 },
@@ -85,8 +86,9 @@ export function renderClients(root, { go }) {
       return `<tr class="click" data-id="${a.id}">
         <td><input type="checkbox" class="check" data-sel ${selected.has(a.id) ? 'checked' : ''}></td>
         <td><span class="dot ${a.online ? (a.alerts.length ? 'alert' : 'online') : 'offline'}" style="display:inline-block"></span></td>
-        <td style="min-width:260px"><div class="row" style="gap:8px;flex-wrap:wrap"><span style="font-weight:500">${esc(a.name)}</span>${pveBadge(a, { small: true })}</div>${a.tags?.length ? `<div class="tag-row" style="gap:4px;margin-top:5px">${a.tags.map((x) => tagHtml(x, { small: true })).join('')}</div>` : ''}</td>
-        <td><span class="os">${clientIcon(a)}${esc(osName(a))}</span></td>
+        <td class="cl-name"><div class="n">${esc(a.name)}</div>${a.pve ? `<div class="sub">${pveLine(a)}</div>` : ''}</td>
+        <td class="cl-tags">${(a.tags || []).map((x) => tagHtml(x, { small: true })).join('')}</td>
+        <td class="cl-os" title="${esc(osName(a))}"><span class="os">${clientIcon(a)}${esc(osShort(a))}</span></td>
         <td class="mono">${esc(primaryIp(a))}</td>
         <td>${a.online ? mini(m?.cpu, '', t.cpu) : '<span class="muted">–</span>'}</td>
         <td>${a.online ? mini(memPct(m), 'mem', t.mem) : '<span class="muted">–</span>'}</td>
