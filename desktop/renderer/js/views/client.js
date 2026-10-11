@@ -6,6 +6,7 @@ import {
 import { lineChart } from '../charts.js';
 import { RemoteTerminal } from '../terminal.js';
 import { showRunResult, renderAuditLog } from './history.js';
+import { assignDialog, openConsole, pvePower, renderProxmoxTab } from '../proxmox.js';
 
 const TABS = [
   { key: 'overview', label: 'Übersicht', icon: 'activity' },
@@ -15,11 +16,13 @@ const TABS = [
   { key: 'scripts', label: 'Skripte', icon: 'code' },
   { key: 'notes', label: 'Notizen', icon: 'note' },
   { key: 'audit', label: 'Protokoll', icon: 'shield' },
+  { key: 'proxmox', label: 'Proxmox', icon: 'server', pveOnly: true },
 ];
 
 export function renderClient(root, { go, params }) {
   const id = params[0];
-  let tab = TABS.some((t) => t.key === params[1]) ? params[1] : 'overview';
+  const tabs = TABS.filter((t) => !t.pveOnly || api.agents.get(id)?.info?.proxmox);
+  let tab = tabs.some((t) => t.key === params[1]) ? params[1] : 'overview';
   let cleanupTab = null;
 
   if (!api.agents.get(id)) {
@@ -32,7 +35,7 @@ export function renderClient(root, { go, params }) {
   root.innerHTML = `
     <button class="crumb" data-back style="margin-bottom:10px">${icon('back', 'sm')}Clients</button>
     <div class="detail-head" data-head></div>
-    <div class="tabs">${TABS.map((t) => `<button class="tab" data-tab="${t.key}">${icon(t.icon, 'sm')}${t.label}</button>`).join('')}</div>
+    <div class="tabs">${tabs.map((t) => `<button class="tab" data-tab="${t.key}">${icon(t.icon, 'sm')}${t.label}</button>`).join('')}</div>
     <div data-body></div>`;
   $('[data-back]', root).onclick = () => history.length > 1 ? history.back() : go('#/clients');
 
@@ -45,20 +48,23 @@ export function renderClient(root, { go, params }) {
       <div class="detail-icon">${osIcon(a.platform)}</div>
       <div class="detail-title grow">
         <h1>${esc(a.name)} <button class="btn ghost sm icon-only" title="Umbenennen" data-rename>${icon('edit', 'sm')}</button></h1>
-        <div class="meta">${statusHtml(a)}<span>${esc(a.os || osLabel(a.platform))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}</div>
+        <div class="meta">${statusHtml(a)}<span>${esc(a.os || osLabel(a.platform))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}${a.pve ? `<span class="badge accent" title="Proxmox-Zuordnung">${icon('server')}${a.pve.type === 'lxc' ? 'Container' : 'VM'} ${a.pve.vmid} · ${esc(a.pve.hostName)}</span>` : ''}${a.info?.proxmox ? `<span class="badge accent">${icon('server')}Proxmox VE ${esc(a.info.proxmox.version)}</span>` : ''}</div>
         ${a.tags?.length ? `<div class="tag-row" style="margin-top:6px">${a.tags.map((t) => tagHtml(t)).join('')}</div>` : ''}
       </div>
       <div class="btn-group">
+        ${a.pve ? `<button class="btn" data-act="console" ${a.pve.hostOnline ? '' : 'disabled title="Proxmox-Host ist offline"'}>${icon(a.pve.type === 'lxc' ? 'terminal' : 'monitor', 'sm')}Konsole</button>` : ''}
         ${a.online ? `
           <button class="btn" data-act="terminal">${icon('terminal', 'sm')}Terminal</button>
           <button class="btn" data-act="reboot">${icon('refresh', 'sm')}Neustart</button>
           <button class="btn" data-act="shutdown">${icon('power', 'sm')}Herunterfahren</button>
-        ` : `<button class="btn" data-act="wake">${icon('zap', 'sm')}Aufwecken (WoL)</button>`}
+        ` : `<button class="btn" data-act="wake">${icon(a.pve ? 'play' : 'zap', 'sm')}${a.pve ? 'Starten (Proxmox)' : 'Aufwecken (WoL)'}</button>`}
         <button class="btn icon-only" data-act="more" title="Weitere Aktionen">⋯</button>
       </div>`;
     $('[data-rename]', head).onclick = rename;
     $$('[data-act]', head).forEach((b) => (b.onclick = (e) => action(b.dataset.act, e)));
   }
+
+  const guestOf = (a) => ({ hostId: a.pve.hostId, vmid: a.pve.vmid, type: a.pve.type, name: a.name, label: a.name, hostName: a.pve.hostName });
 
   async function rename() {
     const a = agent();
@@ -79,8 +85,9 @@ export function renderClient(root, { go, params }) {
       }
       if (kind === 'wake') {
         const r = await api.post(`/api/agents/${id}/wake`);
-        return toast(`Magic Packet gesendet (über ${r.via})`);
+        return toast(a.pve ? `Wird gestartet (über ${r.via})` : `Magic Packet gesendet (über ${r.via})`);
       }
+      if (kind === 'console') return openConsole(guestOf(a));
       if (kind === 'more') return moreMenu(ev.currentTarget);
     } catch (e) {
       toast(e.message, 'err');
@@ -91,6 +98,11 @@ export function renderClient(root, { go, params }) {
     const a = agent();
     const items = [
       { k: 'rename', label: 'Umbenennen', icon: 'edit' },
+      ...(a.info?.proxmox ? [] : [{ k: 'pve', label: a.pve ? 'Proxmox-Zuordnung ändern' : 'Proxmox-VM zuordnen', icon: 'server' }]),
+      ...(a.pve && a.pve.hostOnline ? [
+        { k: 'pve-reboot', label: 'Über Proxmox neu starten', icon: 'refresh' },
+        { k: 'pve-stop', label: 'Über Proxmox ausschalten (hart)', icon: 'stop', danger: true },
+      ] : []),
       ...(a.online ? [
         { k: 'update', label: 'Agent aktualisieren', icon: 'download' },
         { k: 'uninstall', label: 'Agent deinstallieren', icon: 'trash', danger: true },
@@ -109,6 +121,9 @@ export function renderClient(root, { go, params }) {
       close();
       try {
         if (k === 'rename') return rename();
+        if (k === 'pve') return assignDialog(a);
+        if (k === 'pve-reboot') return pvePower(guestOf(a), 'reboot');
+        if (k === 'pve-stop') return pvePower(guestOf(a), 'stop');
         if (k === 'update') {
           await api.action(id, 'update');
           return toast('Agent wird aktualisiert und neu gestartet');
@@ -138,7 +153,7 @@ export function renderClient(root, { go, params }) {
     cleanupTab?.();
     const body = $('[data-body]', root);
     body.innerHTML = '';
-    cleanupTab = { overview, terminal, processes, services, scripts, notes, audit }[key](body) || null;
+    cleanupTab = { overview, terminal, processes, services, scripts, notes, audit, proxmox }[key](body) || null;
   }
   $$('[data-tab]', root).forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
 
@@ -448,6 +463,11 @@ export function renderClient(root, { go, params }) {
     }
     loadHist();
     return api.on('history', loadHist);
+  }
+
+  // Proxmox-Host: VMs und Container
+  function proxmox(body) {
+    return renderProxmoxTab(body, id);
   }
 
   // Protokoll: alles, was mit diesem Client passiert ist

@@ -213,7 +213,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .detail-title { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .detail-title h1 { margin: 0; font-size: 22px; font-weight: 650; display: flex; align-items: center; gap: 10px; }
 .detail-title .meta { display: flex; gap: 14px; color: var(--muted); font-size: 12.5px; flex-wrap: wrap; align-items: center; }
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 18px; overflow-x: auto; scrollbar-width: thin; }
+.tab { flex: none; }
 .tab { border: 0; background: none; color: var(--text-2); padding: 10px 14px; cursor: pointer; display: inline-flex; gap: 8px; align-items: center; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tab:hover { color: var(--text); }
 .tab.on { color: var(--text); border-bottom-color: var(--accent); }
@@ -315,3 +316,16 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tbl tr.day-row td { background: var(--surface-2); color: var(--text-2); font-size: 12px; font-weight: 600; padding: 7px 14px; position: sticky; top: 37px; z-index: 1; }
 .tbl tbody tr.day-row:hover td { background: var(--surface-2); }
 .nav.nav-bottom { margin-top: 0; }
+
+/* ---------- Proxmox-Konsole ---------- */
+.console-overlay { position: fixed; inset: 0; z-index: 40; background: #000; display: flex; flex-direction: column; }
+.console-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.console-bar .spacer { flex: 1; }
+.console-bar .select.sm { height: 28px; font-size: 12.5px; width: auto; padding-left: 10px; }
+.console-title { display: flex; flex-direction: column; line-height: 1.2; margin-right: 8px; }
+.console-title .muted { font-size: 11.5px; }
+.console-status { font-size: 12.5px; }
+.console-screen { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #000; }
+.console-screen.term-host { padding: 8px; background: #0b0b0c; }
+.link-client { display: inline-flex; align-items: center; gap: 7px; color: var(--text); text-decoration: none; }
+.link-client:hover { text-decoration: underline; }

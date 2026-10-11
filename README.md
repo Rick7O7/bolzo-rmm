@@ -122,6 +122,26 @@ npm version minor             # bzw. patch – Dashboard-Version erhöhen
 npm run release               # baut die Setup-EXE und legt das GitHub-Release an
 ```
 
+## Proxmox
+
+Läuft der BOLZO-Agent (ab 1.3.0) auf einem Proxmox-Server, erkennt er das selbst. Der Client bekommt
+dann einen Tab **Proxmox** mit allen VMs und Containern (Status, CPU, RAM, Laufzeit), dazu Starten,
+Herunterfahren, Neustart und hartes Ausschalten.
+
+- **Zuordnen:** Client → ⋯ → „Proxmox-VM zuordnen“, oder im Proxmox-Tab **Automatisch zuordnen**
+  (vergleicht die MAC-Adressen der VMs mit denen der Clients).
+- **Konsole:** Zugeordnete Clients haben oben den Knopf **Konsole**. Er geht auch dann, wenn der
+  Gast hängt oder der Agent darin nicht läuft.
+  - **VM:** Bildschirm per noVNC. **Text einfügen** tippt die Zwischenablage in die VM; dafür oben das
+    Tastaturlayout der VM wählen. Dazu Strg+Alt+Entf, Anpassen/1:1 und Vollbild.
+  - **Container:** echtes Terminal (`pct enter`). Kopieren und Einfügen gehen in beide Richtungen.
+- **Aufwecken** startet zugeordnete VMs und Container über Proxmox statt per Wake-on-LAN, auch über
+  die Telefon-Sprachsteuerung.
+
+Technisch: Der Host-Agent setzt per QEMU-Monitor ein Einmal-Passwort, das 60 s gilt. Dann verbindet er
+den VNC-Socket der VM über einen eigenen WebSocket (`/ws/tunnel`) mit dem Server, der die Daten
+unverändert an die App reicht (`/ws/console`). Am Proxmox muss dafür nichts eingerichtet werden.
+
 ## Sprachsteuerung per Telefon (optional)
 
 Eine ungenutzte Festnetznummer der FRITZ!Box anrufen, PIN eintippen und z.B. „Fahr SRV-MC herunter"

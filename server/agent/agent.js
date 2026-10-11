@@ -7,11 +7,16 @@ const path = require('path');
 const cp = require('child_process');
 const crypto = require('crypto');
 const dgram = require('dgram');
+const net = require('net');
 
-const VERSION = '1.2.1';
+const VERSION = '1.3.0';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
+// BOLZO_TEST_VNC=host:port: Testmodus ohne Proxmox (spielt einen Host mit zwei Gästen vor)
+const TEST_PVE = !!process.env.BOLZO_TEST_VNC;
+const IS_PVE = TEST_PVE || (!IS_WIN && fs.existsSync('/usr/bin/pvesh'));
+const pveNode = () => os.hostname().split('.')[0];
 const CFG_PATH = process.env.RMM_AGENT_CONFIG || path.join(__dirname, 'config.json');
 const METRICS_INTERVAL = 5000;
 const DISK_INTERVAL = 30000;
@@ -98,7 +103,13 @@ async function getStaticInfo() {
     model = `${vendor} ${product}`.trim();
     if (!model && fs.existsSync('/proc/1/environ') && /container=lxc/.test(readFile('/proc/1/environ'))) model = 'LXC-Container';
   }
-  staticInfo = { os: osName, model };
+  let proxmox;
+  if (TEST_PVE) proxmox = { node: 'test', version: 'Testmodus' };
+  else if (IS_PVE) {
+    const v = (await exec('pveversion', [])).stdout.match(/pve-manager\/([^/\s]+)/);
+    proxmox = { node: pveNode(), version: v ? v[1] : '' };
+  }
+  staticInfo = { os: osName, model, proxmox };
   return staticInfo;
 }
 
@@ -119,6 +130,7 @@ async function getInfo() {
     interfaces: interfaces(),
     agentVersion: VERSION,
     nodeVersion: process.version,
+    ...(s.proxmox ? { proxmox: s.proxmox } : {}),
   };
 }
 
@@ -372,8 +384,12 @@ while ($true) {
 const shells = new Map();
 let hasScriptCmd = null;
 
-async function openShell({ sid, cols = 120, rows = 30 }) {
+async function openShell({ sid, cols = 120, rows = 30, lxc }) {
   if (shells.has(sid)) throw new Error('Sitzung existiert bereits');
+  if (lxc != null) {
+    if (!IS_PVE || IS_WIN) throw new Error('Kein Proxmox-Host');
+    lxc = checkGuest({ vmid: lxc, type: 'lxc' }).vmid;
+  }
   cols = Math.max(20, Math.min(500, Number(cols) || 120));
   rows = Math.max(5, Math.min(200, Number(rows) || 30));
   let child, mode, shellName;
@@ -387,13 +403,16 @@ async function openShell({ sid, cols = 120, rows = 30 }) {
     const env = { ...process.env, TERM: 'xterm-256color', HOME: os.homedir(), LANG: process.env.LANG || 'C.UTF-8' };
     if (hasScriptCmd) {
       // "script" stellt ein echtes Pseudo-Terminal bereit -> vim, top, htop funktionieren
-      child = cp.spawn('script', ['-qfc', `stty cols ${cols} rows ${rows} 2>/dev/null; exec ${sh} -l`, '/dev/null'], { cwd: os.homedir(), env, detached: true });
+      const target = lxc != null ? `pct enter ${lxc}` : `${sh} -l`;
+      child = cp.spawn('script', ['-qfc', `stty cols ${cols} rows ${rows} 2>/dev/null; exec ${target}`, '/dev/null'], { cwd: os.homedir(), env, detached: true });
       mode = 'pty';
+    } else if (lxc != null) {
+      throw new Error('Für die Container-Konsole wird "script" (util-linux) benötigt');
     } else {
       child = cp.spawn(sh, ['-i'], { cwd: os.homedir(), env, detached: true });
       mode = 'line';
     }
-    shellName = path.basename(sh);
+    shellName = lxc != null ? `Container ${lxc}` : path.basename(sh);
   }
   const out = (d) => send({ type: 'shell.out', sid, data: d.toString('base64') });
   child.stdout.on('data', out);
@@ -413,6 +432,132 @@ function closeShell(sid) {
   try { s.child.stdin.end(); } catch {}
   killTree(s.child);
   shells.delete(sid);
+}
+
+// ---------------------------------------------------------------------------
+// Proxmox VE – nur auf einem Proxmox-Host: Gäste auflisten und steuern,
+// VM-Bildschirm (VNC) über einen eigenen Tunnel zum Server weiterreichen
+// ---------------------------------------------------------------------------
+const PVE_TYPES = { qemu: 'qemu-server', lxc: 'lxc' };
+const PVE_OPS = ['start', 'shutdown', 'stop', 'reboot'];
+
+function checkGuest({ vmid, type }) {
+  vmid = Number(vmid);
+  if (!Number.isInteger(vmid) || vmid < 100 || vmid > 999999999) throw new Error('Ungültige VM-ID');
+  if (!PVE_TYPES[type]) throw new Error('Ungültiger Gast-Typ');
+  return { vmid, type };
+}
+
+async function pvesh(method, apiPath, args = [], timeout = 60000) {
+  if (!IS_PVE) throw new Error('Kein Proxmox-Host');
+  const r = await exec('pvesh', [method, apiPath, ...args, '--output-format', 'json'], { timeout });
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split('\n').pop() || 'pvesh-Fehler');
+  try { return JSON.parse(r.stdout || 'null'); } catch { return r.stdout.trim(); }
+}
+
+// MAC-Adressen aus der Gast-Konfiguration (für die automatische Zuordnung)
+function guestMacs(type, vmid) {
+  const conf = readFile(`/etc/pve/nodes/${pveNode()}/${PVE_TYPES[type]}/${vmid}.conf`).split(/^\[/m)[0]; // ohne Snapshots
+  return [...conf.matchAll(/^net\d+:.*?=([0-9a-f]{2}(?::[0-9a-f]{2}){5})/gim)].map((m) => m[1].toLowerCase());
+}
+
+async function pveGuests() {
+  if (TEST_PVE) {
+    const mac = (interfaces()[0]?.mac || '').toLowerCase();
+    return { node: 'test', guests: [
+      { vmid: 101, type: 'qemu', name: 'test-vm', status: 'running', template: false, cpu: 0.12, cpus: 2, mem: 1.2e9, maxmem: 4e9, uptime: 7300, macs: [mac] },
+      { vmid: 102, type: 'lxc', name: 'test-ct', status: 'stopped', template: false, cpu: 0, cpus: 1, mem: 0, maxmem: 1e9, uptime: 0, macs: [] },
+    ] };
+  }
+  const node = pveNode();
+  const [vms, cts] = await Promise.all([pvesh('get', `/nodes/${node}/qemu`), pvesh('get', `/nodes/${node}/lxc`)]);
+  const map = (type) => (g) => ({
+    vmid: Number(g.vmid), type, name: g.name || '', status: g.status || '', template: !!g.template,
+    cpu: g.cpu || 0, cpus: g.cpus || g.maxcpu || 0, mem: g.mem || 0, maxmem: g.maxmem || 0, uptime: g.uptime || 0,
+    macs: guestMacs(type, g.vmid),
+  });
+  return { node, guests: [...(vms || []).map(map('qemu')), ...(cts || []).map(map('lxc'))].sort((a, b) => a.vmid - b.vmid) };
+}
+
+// Starten/Herunterfahren können lange dauern: kurz auf Fehler warten, dann im Hintergrund weiterlaufen lassen
+async function pvePower(p) {
+  const { vmid, type } = checkGuest(p);
+  if (!PVE_OPS.includes(p.op)) throw new Error('Unbekannte Aktion');
+  if (!IS_PVE) throw new Error('Kein Proxmox-Host');
+  if (TEST_PVE) return { ok: true, test: true };
+  const child = cp.spawn('pvesh', ['create', `/nodes/${pveNode()}/${type}/${vmid}/status/${p.op}`], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
+  child.stderr.on('data', (d) => (out += d));
+  const code = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), 8000);
+    child.on('close', (c) => { clearTimeout(t); resolve(c); });
+    child.on('error', () => { clearTimeout(t); resolve(-1); });
+  });
+  child.unref();
+  if (code !== null && code !== 0) throw new Error(out.trim().split('\n').filter(Boolean).pop() || `Fehler (${code})`);
+  return { ok: true, pending: code === null };
+}
+
+const tunnels = new Map();
+
+// Verbindet ein lokales Ziel (VNC-Socket der VM) mit einem eigenen WebSocket zum Server.
+// Die Daten laufen binär durch, der Server reicht sie unverändert an die App weiter.
+function openTunnel(sid, target) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(target);
+    let tun = null;
+    let finished = false;
+    const close = () => {
+      if (finished) return;
+      finished = true;
+      tunnels.delete(sid);
+      sock.destroy();
+      try { tun?.close(); } catch {}
+    };
+    tunnels.set(sid, { close });
+    setTimeout(() => { if (!tun || tun.readyState !== 1) { reject(new Error('Zeitüberschreitung beim Tunnelaufbau')); close(); } }, 15000);
+    sock.once('error', (e) => { reject(new Error(`VNC nicht erreichbar: ${e.message}`)); close(); });
+    sock.on('close', close);
+    sock.once('connect', () => {
+      tun = new WebSocket(cfg.server.replace(/^http/, 'ws') + '/ws/tunnel');
+      tun.binaryType = 'arraybuffer';
+      tun.onopen = () => {
+        tun.send(JSON.stringify({ type: 'hello', id: cfg.id, secret: cfg.secret, sid }));
+        // erst jetzt lesen – bis dahin puffert der Socket (der VNC-Server spricht sofort)
+        sock.on('data', (d) => { if (tun.readyState === 1) tun.send(d); });
+        resolve();
+      };
+      tun.onmessage = (e) => { if (typeof e.data !== 'string') sock.write(Buffer.from(e.data)); };
+      tun.onclose = close;
+      tun.onerror = () => { reject(new Error('Tunnel zum Server fehlgeschlagen')); close(); };
+    });
+  });
+}
+
+async function vncOpen(p) {
+  const sid = String(p.sid || '');
+  if (!/^[\w-]{8,64}$/.test(sid)) throw new Error('Ungültige Sitzung');
+  if (process.env.BOLZO_TEST_VNC) { // nur für Tests ohne Proxmox
+    const [host, port] = process.env.BOLZO_TEST_VNC.split(':');
+    await openTunnel(sid, { host, port: Number(port) });
+    return { password: null };
+  }
+  const { vmid } = checkGuest({ vmid: p.vmid, type: 'qemu' });
+  const node = pveNode();
+  const st = await pvesh('get', `/nodes/${node}/qemu/${vmid}/status/current`);
+  if (st?.status !== 'running') throw new Error('Die VM läuft nicht – bitte zuerst starten');
+  // Einmal-Passwort für den VNC-Zugang setzen (wie die Proxmox-Weboberfläche), gilt 60 s für die Anmeldung
+  let password = crypto.randomBytes(6).toString('base64url').slice(0, 8);
+  try {
+    const r = await pvesh('create', `/nodes/${node}/qemu/${vmid}/monitor`, ['--command', `set_password vnc ${password}`]);
+    if (/error|could not/i.test(String(r || ''))) password = null;
+    else await pvesh('create', `/nodes/${node}/qemu/${vmid}/monitor`, ['--command', 'expire_password vnc +60']);
+  } catch {
+    password = null;
+  }
+  await openTunnel(sid, { path: `/var/run/qemu-server/${vmid}.vnc` });
+  return { password };
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +685,10 @@ const actions = {
   setServer,
   uninstall,
   'shell.open': openShell,
+  'pve.guests': pveGuests,
+  'pve.power': pvePower,
+  'vnc.open': vncOpen,
+  'tunnel.close': ({ sid }) => { tunnels.get(sid)?.close(); return { ok: true }; },
 };
 
 async function handle(msg) {

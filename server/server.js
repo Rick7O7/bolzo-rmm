@@ -95,6 +95,7 @@ function summarize(a, withSpark = false) {
     outdated: agentOutdated(a),
     serverUrl: a.serverUrl || '',
     publicIp: a.publicIp || '',
+    pve: a.pve ? { ...a.pve, hostName: agentLabel(store.data.agents[a.pve.hostId]) || '?', hostOnline: conns.has(a.pve.hostId) } : null,
     createdAt: a.createdAt,
     lastSeen: online ? Date.now() : a.lastSeen,
     online,
@@ -287,8 +288,23 @@ app.get('/api/agents/:id', requireScope('status'), wrap(async (req, res) => {
 
 app.patch('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
   const a = getAgent(req);
-  const { name, tags, notes } = req.body || {};
+  const { name, tags, notes, pve } = req.body || {};
   const before = { label: agentLabel(a), tags: a.tags || [], notes: a.notes || '' };
+  if (pve === null && a.pve) {
+    delete a.pve;
+    auditAgent(req, a, 'client', 'Proxmox-Zuordnung entfernt');
+  } else if (pve && typeof pve === 'object') {
+    const host = store.data.agents[pve.hostId];
+    const vmid = Number(pve.vmid);
+    if (!host?.info?.proxmox) throw httpError(400, 'Der gewählte Client ist kein Proxmox-Host');
+    if (host.id === a.id) throw httpError(400, 'Ein Proxmox-Host kann nicht sich selbst zugeordnet werden');
+    if (!Number.isInteger(vmid) || vmid < 100) throw httpError(400, 'Ungültige VM-ID');
+    if (!['qemu', 'lxc'].includes(pve.type)) throw httpError(400, 'Ungültiger Typ');
+    const taken = Object.values(store.data.agents).find((x) => x.id !== a.id && x.pve?.hostId === host.id && x.pve.vmid === vmid);
+    if (taken) throw httpError(409, `ID ${vmid} ist bereits ${agentLabel(taken)} zugeordnet`);
+    a.pve = { hostId: host.id, vmid, type: pve.type };
+    auditAgent(req, a, 'client', 'Proxmox-Zuordnung', { detail: `${pve.type === 'lxc' ? 'Container' : 'VM'} ${vmid} auf ${agentLabel(host)}` });
+  }
   if (typeof name === 'string') a.name = name.trim().slice(0, 80) || undefined;
   if (Array.isArray(tags)) a.tags = [...new Set(tags.map((t) => String(t).trim().slice(0, 32)).filter(Boolean))].slice(0, 20);
   if (typeof notes === 'string') a.notes = notes.slice(0, 20000);
@@ -382,6 +398,12 @@ function sendMagicPacket(macs) {
 const subnet24 = (ip) => ip.split('.').slice(0, 3).join('.');
 app.post('/api/agents/:id/wake', requireScope('power'), wrap(async (req, res) => {
   const a = getAgent(req);
+  if (a.pve && conns.has(a.pve.hostId)) {
+    const host = store.data.agents[a.pve.hostId];
+    await agentRequest(host.id, 'pve.power', { vmid: a.pve.vmid, type: a.pve.type, op: 'start' }, 30000);
+    auditAgent(req, a, 'power', 'Aufwecken', { detail: `über Proxmox (${agentLabel(host)})` });
+    return res.json({ ok: true, via: `Proxmox (${agentLabel(host)})` });
+  }
   const ifaces = (a.info?.interfaces || []).filter((i) => i.mac && i.mac !== '00:00:00:00:00:00');
   if (!ifaces.length) throw httpError(400, 'Keine MAC-Adresse für diesen Client bekannt');
   const macs = [...new Set(ifaces.map((i) => i.mac))];
@@ -399,6 +421,94 @@ app.post('/api/agents/:id/wake', requireScope('power'), wrap(async (req, res) =>
   await sendMagicPacket(macs);
   auditAgent(req, a, 'power', 'Aufwecken', { detail: 'über den Server' });
   res.json({ ok: true, via: 'Server' });
+}));
+
+// ---- Proxmox ---------------------------------------------------------------
+// Alle Aufrufe gehen an den Agent auf dem Proxmox-Host (pvesh/qm/pct als root).
+const PVE_LABELS = { start: 'Starten', shutdown: 'Herunterfahren', stop: 'Ausschalten (hart)', reboot: 'Neustart' };
+const guestKind = (type) => (type === 'lxc' ? 'Container' : 'VM');
+
+function pveHost(req) {
+  const h = getAgent(req);
+  if (!h.info?.proxmox) throw httpError(400, 'Dieser Client ist kein Proxmox-Host (Agent ab Version 1.3.0 nötig)');
+  return h;
+}
+
+// Für das Protokoll: zugeordneter Client, sonst "VM 105 (name) auf PROX"
+function guestAudit(host, vmid, type, name) {
+  const a = Object.values(store.data.agents).find((x) => x.pve?.hostId === host.id && x.pve.vmid === vmid);
+  return a
+    ? { agentId: a.id, target: agentLabel(a), detail: `${guestKind(type)} ${vmid} auf ${agentLabel(host)}` }
+    : { agentId: host.id, target: `${guestKind(type)} ${vmid}${name ? ` (${name})` : ''}`, detail: `auf ${agentLabel(host)}` };
+}
+
+function guestParams(body) {
+  const vmid = Number(body?.vmid);
+  if (!Number.isInteger(vmid) || vmid < 100) throw httpError(400, 'Ungültige VM-ID');
+  if (!['qemu', 'lxc'].includes(body?.type)) throw httpError(400, 'Ungültiger Typ');
+  return { vmid, type: body.type, name: String(body?.name || '').slice(0, 80) };
+}
+
+app.get('/api/agents/:id/pve/guests', requireAdmin, wrap(async (req, res) => {
+  const h = pveHost(req);
+  const r = await agentRequest(h.id, 'pve.guests', {}, 60000);
+  const assigned = {};
+  for (const a of Object.values(store.data.agents)) if (a.pve?.hostId === h.id) assigned[`${a.pve.type}:${a.pve.vmid}`] = a.id;
+  res.json({ ...r, guests: r.guests.map((g) => ({ ...g, agentId: assigned[`${g.type}:${g.vmid}`] || null })) });
+}));
+
+app.post('/api/agents/:id/pve/power', requireAdmin, wrap(async (req, res) => {
+  const h = pveHost(req);
+  const { vmid, type, name } = guestParams(req.body);
+  const op = req.body?.op;
+  if (!PVE_LABELS[op]) throw httpError(400, 'Unbekannte Aktion');
+  const what = guestAudit(h, vmid, type, name);
+  try {
+    const r = await agentRequest(h.id, 'pve.power', { vmid, type, op }, 30000);
+    auditReq(req, 'power', `Proxmox: ${PVE_LABELS[op]}`, what);
+    res.json(r);
+  } catch (e) {
+    auditReq(req, 'power', `Proxmox: ${PVE_LABELS[op]}`, { ...what, ok: false, result: e.message });
+    throw e;
+  }
+}));
+
+// VM-Bildschirm: Der Host-Agent öffnet einen Tunnel (/ws/tunnel) zum VNC der VM, die App
+// verbindet sich mit /ws/console. Der Server reicht die Daten unverändert durch.
+const tunnels = new Map(); // sid -> { hostId, agentWs, adminWs, toAdmin: [], toAgent: [], timer, audit }
+
+function closeTunnel(sid, reason = 'geschlossen') {
+  const t = tunnels.get(sid);
+  if (!t) return;
+  tunnels.delete(sid);
+  clearTimeout(t.timer);
+  for (const ws of [t.agentWs, t.adminWs]) try { ws?.close(); } catch {}
+  if (t.connectedAt && t.audit) {
+    const secs = Math.round((Date.now() - t.connectedAt) / 1000);
+    audit.add({ ...t.audit, action: 'Konsole geschlossen', detail: `${t.audit.detail}, ${reason}, Dauer ${secs >= 60 ? `${Math.floor(secs / 60)} min ${secs % 60} s` : `${secs} s`}` });
+  }
+}
+
+app.post('/api/agents/:id/pve/console', requireAdmin, wrap(async (req, res) => {
+  const h = pveHost(req);
+  const { vmid, type, name } = guestParams(req.body);
+  if (type !== 'qemu') throw httpError(400, 'Die Bildschirm-Konsole gibt es nur für VMs – Container öffnen ein Terminal');
+  const sid = crypto.randomUUID();
+  const what = guestAudit(h, vmid, type, name);
+  const t = { hostId: h.id, agentWs: null, adminWs: null, toAdmin: [], toAgent: [] };
+  t.timer = setTimeout(() => closeTunnel(sid, 'nicht verbunden'), 30000);
+  tunnels.set(sid, t);
+  let r;
+  try {
+    r = await agentRequest(h.id, 'vnc.open', { sid, vmid }, 45000);
+  } catch (e) {
+    closeTunnel(sid);
+    auditReq(req, 'shell', 'Konsole geöffnet', { ...what, ok: false, result: e.message });
+    throw e;
+  }
+  t.audit = { cat: 'shell', actor: actorOf(req), ip: ipOf(req), ...what };
+  audit.add({ ...t.audit, action: 'Konsole geöffnet' });
+  res.json({ sid, password: r?.password || null });
 }));
 
 // ---- Skripte --------------------------------------------------------------
@@ -819,11 +929,17 @@ app.use((err, req, res, next) => {
 const server = http.createServer(app);
 const wssAgent = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
 const wssAdmin = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+const wssTunnel = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/ws/agent') {
     wssAgent.handleUpgrade(req, socket, head, (ws) => wssAgent.emit('connection', ws, req));
+  } else if (url.pathname === '/ws/tunnel') {
+    wssTunnel.handleUpgrade(req, socket, head, (ws) => tunnelAgentSide(ws));
+  } else if (url.pathname === '/ws/console' && validSession(url.searchParams.get('token')) && tunnels.get(url.searchParams.get('sid'))?.adminWs === null) {
+    const sid = url.searchParams.get('sid');
+    wssTunnel.handleUpgrade(req, socket, head, (ws) => tunnelAdminSide(ws, sid));
   } else if (url.pathname === '/ws/admin' && validSession(url.searchParams.get('token'))) {
     const session = noteDevice(validSession(url.searchParams.get('token')), url.searchParams.get('device'));
     wssAdmin.handleUpgrade(req, socket, head, (ws) => {
@@ -835,6 +951,54 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
   }
 });
+
+// Agent-Seite eines Tunnels: erste Nachricht ist die Anmeldung, danach nur Binärdaten
+function keepAlive(ws) {
+  ws.isAlive = true;
+  ws.on('pong', () => (ws.isAlive = true));
+}
+
+function tunnelAgentSide(ws) {
+  keepAlive(ws);
+  let sid = null;
+  const timer = setTimeout(() => ws.close(4001, 'auth timeout'), 10000);
+  ws.on('message', (data, isBinary) => {
+    if (!sid) {
+      let m;
+      try { m = JSON.parse(data); } catch { return ws.close(4003, 'denied'); }
+      const a = store.data.agents[m.id];
+      const t = tunnels.get(m.sid);
+      if (!a || !a.secretHash || !safeEqual(sha256hex(m.secret || ''), a.secretHash) || !t || t.hostId !== a.id || t.agentWs) return ws.close(4003, 'denied');
+      clearTimeout(timer);
+      sid = m.sid;
+      t.agentWs = ws;
+      for (const d of t.toAgent.splice(0)) ws.send(d, { binary: true });
+      return;
+    }
+    const t = tunnels.get(sid);
+    if (!t || !isBinary) return;
+    if (t.adminWs?.readyState === 1) t.adminWs.send(data, { binary: true });
+    else t.toAdmin.push(data);
+  });
+  ws.on('close', () => { clearTimeout(timer); if (sid) closeTunnel(sid, 'von der VM getrennt'); });
+  ws.on('error', () => {});
+}
+
+function tunnelAdminSide(ws, sid) {
+  keepAlive(ws);
+  const t = tunnels.get(sid);
+  if (!t || t.adminWs) return ws.close();
+  clearTimeout(t.timer);
+  t.adminWs = ws;
+  t.connectedAt = Date.now();
+  for (const d of t.toAdmin.splice(0)) ws.send(d, { binary: true });
+  ws.on('message', (data) => {
+    if (t.agentWs?.readyState === 1) t.agentWs.send(data, { binary: true });
+    else t.toAgent.push(data);
+  });
+  ws.on('close', () => closeTunnel(sid, 'geschlossen'));
+  ws.on('error', () => {});
+}
 
 function clientIp(req) {
   const fwd = req.headers['x-forwarded-for'];
@@ -895,6 +1059,7 @@ wssAgent.on('connection', (ws, req) => {
         endShell(sid, 'Verbindung zum Client getrennt');
       }
     }
+    for (const [sid, t] of tunnels) if (t.hostId === agentId) closeTunnel(sid, 'Proxmox-Host getrennt');
     const a = store.data.agents[agentId];
     if (a) {
       a.lastSeen = Date.now();
@@ -952,10 +1117,9 @@ function endShell(sid, reason) {
   if (!s) return;
   shells.delete(sid);
   if (!s.openedAt) return;
-  const a = store.data.agents[s.agentId];
   const secs = Math.round((Date.now() - s.openedAt) / 1000);
   const dur = secs >= 60 ? `${Math.floor(secs / 60)} min ${secs % 60} s` : `${secs} s`;
-  audit.add({ cat: 'shell', action: 'Terminal geschlossen', actor: s.actor, ip: s.ip, agentId: s.agentId, target: agentLabel(a) || s.agentId, detail: `${reason}, Dauer ${dur}` });
+  audit.add({ cat: 'shell', action: `${s.label} geschlossen`, actor: s.actor, ip: s.ip, agentId: s.who.agentId, target: s.who.target, detail: `${reason}, Dauer ${dur}` });
 }
 
 wssAdmin.on('connection', (ws, req) => {
@@ -973,19 +1137,23 @@ wssAdmin.on('connection', (ws, req) => {
     switch (msg.type) {
       case 'shell.open': {
         if (!msg.sid || shells.has(msg.sid)) return;
-        shells.set(msg.sid, { adminWs: ws, agentId: msg.agentId, actor: wsActor, ip: wsIp });
         const a = store.data.agents[msg.agentId];
+        const lxc = msg.lxc != null ? Number(msg.lxc) : null;
+        // Container-Konsole: läuft auf dem Proxmox-Host (pct enter), protokolliert beim Container
+        const who = lxc != null && a ? guestAudit(a, lxc, 'lxc', msg.name) : { agentId: msg.agentId, target: agentLabel(a) || msg.agentId };
+        const label = lxc != null ? 'Container-Konsole' : 'Terminal';
+        shells.set(msg.sid, { adminWs: ws, agentId: msg.agentId, actor: wsActor, ip: wsIp, label, who });
         try {
-          const r = await agentRequest(msg.agentId, 'shell.open', { sid: msg.sid, cols: msg.cols, rows: msg.rows });
+          const r = await agentRequest(msg.agentId, 'shell.open', { sid: msg.sid, cols: msg.cols, rows: msg.rows, ...(lxc != null ? { lxc } : {}) });
           sendJson(ws, { type: 'shell.opened', sid: msg.sid, mode: r.mode, shell: r.shell });
-          log(`[shell] geöffnet auf ${a?.info?.hostname}`);
+          log(`[shell] geöffnet auf ${a?.info?.hostname}${lxc != null ? ` (Container ${lxc})` : ''}`);
           const s = shells.get(msg.sid);
           if (s) s.openedAt = Date.now();
-          audit.add({ cat: 'shell', action: 'Terminal geöffnet', actor: wsActor, ip: wsIp, agentId: msg.agentId, target: agentLabel(a) || msg.agentId, detail: r.shell });
+          audit.add({ cat: 'shell', action: `${label} geöffnet`, actor: wsActor, ip: wsIp, ...who, detail: lxc != null ? who.detail : r.shell });
         } catch (e) {
           shells.delete(msg.sid);
           sendJson(ws, { type: 'shell.error', sid: msg.sid, error: e.message });
-          audit.add({ cat: 'shell', action: 'Terminal geöffnet', actor: wsActor, ip: wsIp, agentId: msg.agentId, target: agentLabel(a) || msg.agentId, ok: false, result: e.message });
+          audit.add({ cat: 'shell', action: `${label} geöffnet`, actor: wsActor, ip: wsIp, ...who, ok: false, result: e.message });
         }
         break;
       }
@@ -1011,7 +1179,7 @@ wssAdmin.on('connection', (ws, req) => {
 
 // Tote Verbindungen erkennen; das JSON-Ping lässt den Agent seinerseits Ausfälle bemerken.
 setInterval(() => {
-  for (const wss of [wssAgent, wssAdmin]) {
+  for (const wss of [wssAgent, wssAdmin, wssTunnel]) {
     for (const ws of wss.clients) {
       if (!ws.isAlive) { ws.terminate(); continue; }
       ws.isAlive = false;

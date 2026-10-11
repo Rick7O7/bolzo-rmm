@@ -13,9 +13,10 @@ function toB64(str) {
 const fromB64 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
 export class RemoteTerminal {
-  constructor(host, agentId, { onStatus } = {}) {
+  constructor(host, agentId, { onStatus, extra } = {}) {
     this.host = host;
     this.agentId = agentId;
+    this.extra = extra || {}; // z.B. { lxc: 105 } für die Container-Konsole auf einem Proxmox-Host
     this.onStatus = onStatus || (() => {});
     this.sid = null;
     this.mode = null;
@@ -78,7 +79,7 @@ export class RemoteTerminal {
     this.line = '';
     this.onStatus('connecting');
     this.term.write('\x1b[90mVerbinde ...\x1b[0m\r\n');
-    api.send({ type: 'shell.open', sid: this.sid, agentId: this.agentId, cols: this.term.cols, rows: this.term.rows });
+    api.send({ type: 'shell.open', sid: this.sid, agentId: this.agentId, cols: this.term.cols, rows: this.term.rows, ...this.extra });
     this.term.focus();
   }
 
