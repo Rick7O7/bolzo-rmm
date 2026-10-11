@@ -302,3 +302,15 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .update-pill { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-radius: var(--radius-sm); background: var(--accent-soft); color: #8bbcf5; font-size: 12.5px; font-weight: 500; text-decoration: none; border: 1px solid rgba(57, 135, 229, 0.35); }
 .update-pill:hover { background: rgba(57, 135, 229, 0.22); }
 .update-pill[hidden] { display: none; }
+
+/* ---------- Protokoll (Audit-Log) ---------- */
+.seg button { display: inline-flex; align-items: center; gap: 6px; }
+.cat-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; white-space: nowrap; color: var(--cat-c); background: color-mix(in srgb, var(--cat-c) 16%, transparent); border: 1px solid color-mix(in srgb, var(--cat-c) 32%, transparent); }
+.audit-ev { display: flex; align-items: center; gap: 9px; }
+.audit-ev .a { font-weight: 500; }
+.audit-detail { margin-top: 4px; font-size: 12px; color: var(--muted); font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; overflow-wrap: anywhere; }
+.audit-tbl td { vertical-align: top; }
+.audit-tbl td .badge { margin-top: 1px; }
+.audit-tbl tr.failed td:first-child { box-shadow: inset 3px 0 0 var(--critical-text); }
+.tbl tr.day-row td { background: var(--surface-2); color: var(--text-2); font-size: 12px; font-weight: 600; padding: 7px 14px; position: sticky; top: 37px; z-index: 1; }
+.tbl tbody tr.day-row:hover td { background: var(--surface-2); }

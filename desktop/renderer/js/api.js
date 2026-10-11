@@ -19,6 +19,8 @@ class Api extends EventTarget {
     this.connected = false;
     this.ws = null;
     this._retry = null;
+    this.device = '';
+    window.rmmDesk?.appInfo?.().then((i) => (this.device = i?.hostname || '')).catch(() => {});
   }
 
   get loggedIn() { return !!(this.server && this.token); }
@@ -35,7 +37,11 @@ class Api extends EventTarget {
     try {
       res = await fetch(this.server + path, {
         method,
-        headers: { Authorization: `Bearer ${this.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          ...(this.device ? { 'X-Bolzo-Device': this.device } : {}),
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+        },
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch {
@@ -59,7 +65,7 @@ class Api extends EventTarget {
     server = server.trim().replace(/\/+$/, '');
     if (!/^https?:\/\//.test(server)) server = 'http://' + server;
     this.server = server;
-    const { token } = await this.request('POST', '/api/login', { password });
+    const { token } = await this.request('POST', '/api/login', { password, device: this.device });
     this.token = token;
     LS.set('server', server);
     LS.set('token', token);
@@ -77,7 +83,8 @@ class Api extends EventTarget {
   // ---------- Live-Verbindung ----------
   connect() {
     this.disconnect();
-    const url = this.server.replace(/^http/, 'ws') + '/ws/admin?token=' + encodeURIComponent(this.token);
+    const url = this.server.replace(/^http/, 'ws') + '/ws/admin?token=' + encodeURIComponent(this.token)
+      + (this.device ? '&device=' + encodeURIComponent(this.device) : '');
     const ws = new WebSocket(url);
     this.ws = ws;
     ws.onopen = () => {
@@ -144,6 +151,9 @@ class Api extends EventTarget {
       }
       case 'history':
         this.emit('history');
+        break;
+      case 'audit':
+        this.emit('audit', msg.entry);
         break;
       default:
         if (msg.type?.startsWith('shell.')) this.emit('shell', msg);

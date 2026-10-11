@@ -1,6 +1,7 @@
 'use strict';
 const { app, BrowserWindow, shell, Menu, nativeTheme, ipcMain } = require('electron');
 const path = require('path');
+const os = require('os');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
@@ -82,7 +83,7 @@ function initUpdater() {
   setInterval(check, 4 * 3600e3);
 }
 
-ipcMain.handle('app-info', () => ({ version: app.getVersion(), packaged: app.isPackaged }));
+ipcMain.handle('app-info', () => ({ version: app.getVersion(), packaged: app.isPackaged, hostname: os.hostname() }));
 ipcMain.handle('update-state', () => updateState);
 ipcMain.handle('update-check', async () => {
   if (!autoUpdater) return updateState;

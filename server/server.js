@@ -8,6 +8,7 @@ const dgram = require('dgram');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { Store } = require('./store');
+const { AuditLog } = require('./audit');
 
 // ---------------------------------------------------------------------------
 // Konfiguration: Umgebungsvariablen, optional ergänzt durch server/.env
@@ -29,6 +30,7 @@ const SESSION_DAYS = 30;
 const HISTORY_POINTS = 720; // 1 h bei 5-s-Intervall
 
 const store = new Store(DATA_DIR);
+const audit = new AuditLog(DATA_DIR);
 
 let ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 if (!ADMIN_PASSWORD) {
@@ -145,7 +147,7 @@ app.use(express.json({ limit: '2mb' }));
 
 app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
-  res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Bolzo-Device');
   res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -154,9 +156,9 @@ app.use((req, res, next) => {
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 function validSession(token) {
-  if (!token) return false;
+  if (!token) return null;
   const s = store.data.sessions[sha256hex(token)];
-  return !!s && s.expires > Date.now();
+  return s && s.expires > Date.now() ? s : null;
 }
 
 // API-Zugänge (z.B. für die Sprachsteuerung) dürfen nur, was ihre Rechte (scopes) erlauben:
@@ -174,9 +176,19 @@ function bearer(req) {
   return (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
 }
 
+// Name des PCs, auf dem die App läuft – fürs Protokoll ("Admin (JEAN-PC)")
+function noteDevice(session, name) {
+  const device = String(name || '').trim().slice(0, 60);
+  if (session && device && session.device !== device) {
+    session.device = device;
+    store.save();
+  }
+  return session;
+}
+
 function requireAdmin(req, res, next) {
   const token = bearer(req);
-  if (validSession(token)) return next();
+  if ((req.session = noteDevice(validSession(token), req.get('x-bolzo-device')))) return next();
   if (apiTokenFor(token)) return res.status(403).json({ error: 'Dieser API-Zugang hat dafür keine Berechtigung' });
   res.status(401).json({ error: 'Nicht angemeldet' });
 }
@@ -184,7 +196,7 @@ function requireAdmin(req, res, next) {
 function requireScope(scope) {
   return (req, res, next) => {
     const token = bearer(req);
-    if (validSession(token)) return next();
+    if ((req.session = noteDevice(validSession(token), req.get('x-bolzo-device')))) return next();
     const t = apiTokenFor(token);
     if (!t) return res.status(401).json({ error: 'Nicht angemeldet' });
     if (!t.scopes.includes(scope)) return res.status(403).json({ error: 'Dieser API-Zugang hat dafür keine Berechtigung' });
@@ -197,19 +209,26 @@ function requireScope(scope) {
   };
 }
 
-// Aktionen über API-Zugänge im Verlauf festhalten
-function auditApi(req, agent, label) {
-  if (!req.apiToken) return;
-  log(`[api] ${req.apiToken.name}: ${label} -> ${agent.info?.hostname || agent.id}`);
-  store.data.history.unshift({
-    id: crypto.randomUUID(), ts: Date.now(), agentId: agent.id, hostname: agent.name || agent.info?.hostname || agent.id,
-    scriptName: `${req.apiToken.name}: ${label}`, shell: 'api', exitCode: 0, durationMs: 0,
-    output: `Ausgeführt über den API-Zugang „${req.apiToken.name}".`,
-  });
-  store.data.history.length = Math.min(store.data.history.length, 300);
-  store.save();
-  broadcast({ type: 'history' });
+// ---- Audit-Log -------------------------------------------------------------
+// Kategorien: auth, client, power, action, script, shell, settings, system, connection
+const ipOf = (req) => String(req.ip || '').replace(/^::ffff:/, '');
+const agentLabel = (a) => (a ? a.name || a.info?.hostname || a.hostname || a.id : '');
+
+function actorOf(req) {
+  if (req.apiToken) return `API: ${req.apiToken.name}`;
+  if (req.session) return req.session.device ? `Admin (${req.session.device})` : 'Admin';
+  return 'Unbekannt';
 }
+
+function auditReq(req, cat, action, extra = {}) {
+  return audit.add({ cat, action, actor: actorOf(req), ip: ipOf(req), ...extra });
+}
+
+function auditAgent(req, a, cat, action, extra = {}) {
+  return auditReq(req, cat, action, { agentId: a.id, target: agentLabel(a), ...extra });
+}
+
+audit.onEntry((entry) => broadcast({ type: 'audit', entry }));
 
 app.get('/health', (req, res) => res.json({ ok: true, id: store.data.serverId, agents: Object.keys(store.data.agents).length, online: conns.size }));
 
@@ -218,11 +237,16 @@ const loginFails = new Map(); // ip -> [timestamps]
 app.post('/api/login', wrap(async (req, res) => {
   const ip = req.ip;
   const recent = (loginFails.get(ip) || []).filter((t) => t > Date.now() - 10 * 60e3);
-  if (recent.length >= 5) return res.status(429).json({ error: 'Zu viele Fehlversuche – bitte 10 Minuten warten' });
+  const device = String(req.body?.device || '').trim().slice(0, 60);
+  if (recent.length >= 5) {
+    audit.add({ cat: 'auth', action: 'Anmeldung gesperrt', actor: device || 'Unbekannt', ip: ipOf(req), detail: 'Zu viele Fehlversuche', ok: false });
+    return res.status(429).json({ error: 'Zu viele Fehlversuche – bitte 10 Minuten warten' });
+  }
   const { password } = req.body || {};
   if (!password || !safeEqual(password, ADMIN_PASSWORD)) {
     recent.push(Date.now());
     loginFails.set(ip, recent);
+    audit.add({ cat: 'auth', action: 'Anmeldung fehlgeschlagen', actor: device || 'Unbekannt', ip: ipOf(req), detail: 'Falsches Passwort', ok: false });
     await new Promise((r) => setTimeout(r, 600));
     return res.status(401).json({ error: 'Falsches Passwort' });
   }
@@ -230,8 +254,10 @@ app.post('/api/login', wrap(async (req, res) => {
   const token = crypto.randomBytes(32).toString('base64url');
   const now = Date.now();
   for (const [k, s] of Object.entries(store.data.sessions)) if (s.expires < now) delete store.data.sessions[k];
-  store.data.sessions[sha256hex(token)] = { created: now, expires: now + SESSION_DAYS * 864e5 };
+  req.session = { created: now, expires: now + SESSION_DAYS * 864e5, device: device || undefined, ip: ipOf(req) };
+  store.data.sessions[sha256hex(token)] = req.session;
   store.save();
+  auditReq(req, 'auth', 'Anmeldung');
   res.json({ token });
 }));
 
@@ -239,6 +265,7 @@ app.post('/api/logout', requireAdmin, (req, res) => {
   const token = req.get('authorization').replace(/^Bearer\s+/i, '');
   delete store.data.sessions[sha256hex(token)];
   store.save();
+  auditReq(req, 'auth', 'Abmeldung');
   res.json({ ok: true });
 });
 
@@ -261,10 +288,18 @@ app.get('/api/agents/:id', requireScope('status'), wrap(async (req, res) => {
 app.patch('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
   const a = getAgent(req);
   const { name, tags, notes } = req.body || {};
+  const before = { label: agentLabel(a), tags: a.tags || [], notes: a.notes || '' };
   if (typeof name === 'string') a.name = name.trim().slice(0, 80) || undefined;
   if (Array.isArray(tags)) a.tags = [...new Set(tags.map((t) => String(t).trim().slice(0, 32)).filter(Boolean))].slice(0, 20);
   if (typeof notes === 'string') a.notes = notes.slice(0, 20000);
   store.save();
+  if (agentLabel(a) !== before.label) auditAgent(req, a, 'client', 'Umbenannt', { detail: `${before.label} → ${agentLabel(a)}` });
+  const added = (a.tags || []).filter((t) => !before.tags.includes(t));
+  const removed = before.tags.filter((t) => !(a.tags || []).includes(t));
+  if (added.length || removed.length) {
+    auditAgent(req, a, 'client', 'Tags geändert', { detail: [...added.map((t) => `+${t}`), ...removed.map((t) => `−${t}`)].join(', ') });
+  }
+  if ((a.notes || '') !== before.notes) auditAgent(req, a, 'client', 'Notizen geändert');
   broadcastAgent(a.id);
   res.json(summarize(a));
 }));
@@ -275,6 +310,7 @@ app.delete('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
   delete store.data.agents[a.id];
   live.delete(a.id);
   store.save();
+  auditAgent(req, a, 'client', 'Client entfernt');
   if (c) {
     sendJson(c.ws, { type: 'revoked' });
     c.ws.close(4003, 'revoked');
@@ -285,14 +321,35 @@ app.delete('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
 
 const ACTIONS = new Set(['processes', 'kill', 'services', 'service', 'reboot', 'shutdown', 'update', 'uninstall', 'info']);
 const POWER_LABELS = { reboot: 'Neustart', shutdown: 'Herunterfahren' };
+const SERVICE_OPS = { start: 'Dienst gestartet', stop: 'Dienst gestoppt', restart: 'Dienst neu gestartet' };
+
+// Nur verändernde Aktionen landen im Protokoll (Prozess-/Dienstlisten nicht)
+function auditedAction(action, params) {
+  switch (action) {
+    case 'reboot':
+    case 'shutdown': return { cat: 'power', action: POWER_LABELS[action] };
+    case 'kill': return { cat: 'action', action: 'Prozess beendet', detail: params.name ? `${params.name} (PID ${params.pid})` : `PID ${params.pid}` };
+    case 'service': return { cat: 'action', action: SERVICE_OPS[params.op] || `Dienst: ${params.op}`, detail: params.name };
+    case 'update': return { cat: 'action', action: 'Agent-Update', detail: 'manuell' };
+    case 'uninstall': return { cat: 'action', action: 'Agent deinstalliert' };
+    default: return null;
+  }
+}
 app.post('/api/agents/:id/action', requireScope('power'), wrap(async (req, res) => {
   const a = getAgent(req);
   const { action, params } = req.body || {};
   if (!ACTIONS.has(action)) throw httpError(400, 'Unbekannte Aktion');
   if (req.apiToken && !POWER_LABELS[action]) throw httpError(403, 'Dieser API-Zugang darf nur neu starten und herunterfahren');
-  auditApi(req, a, POWER_LABELS[action]);
   log(`[action] ${action} -> ${a.info?.hostname || a.id}`);
-  const result = await agentRequest(a.id, action, params || {}, action === 'services' || action === 'processes' ? 45000 : 30000);
+  const what = auditedAction(action, params || {});
+  let result;
+  try {
+    result = await agentRequest(a.id, action, params || {}, action === 'services' || action === 'processes' ? 45000 : 30000);
+  } catch (e) {
+    if (what) auditAgent(req, a, what.cat, what.action, { detail: what.detail, ok: false, result: e.message });
+    throw e;
+  }
+  if (what) auditAgent(req, a, what.cat, what.action, { detail: what.detail });
   if (action === 'info') {
     a.info = result;
     store.save();
@@ -325,7 +382,6 @@ function sendMagicPacket(macs) {
 const subnet24 = (ip) => ip.split('.').slice(0, 3).join('.');
 app.post('/api/agents/:id/wake', requireScope('power'), wrap(async (req, res) => {
   const a = getAgent(req);
-  auditApi(req, a, 'Aufwecken');
   const ifaces = (a.info?.interfaces || []).filter((i) => i.mac && i.mac !== '00:00:00:00:00:00');
   if (!ifaces.length) throw httpError(400, 'Keine MAC-Adresse für diesen Client bekannt');
   const macs = [...new Set(ifaces.map((i) => i.mac))];
@@ -336,10 +392,12 @@ app.post('/api/agents/:id/wake', requireScope('power'), wrap(async (req, res) =>
     const hit = (other?.info?.interfaces || []).some((i) => nets.has(subnet24(i.ip)));
     if (hit) {
       await agentRequest(id, 'wol', { macs });
+      auditAgent(req, a, 'power', 'Aufwecken', { detail: `über ${agentLabel(other)}` });
       return res.json({ ok: true, via: other.name || other.info.hostname });
     }
   }
   await sendMagicPacket(macs);
+  auditAgent(req, a, 'power', 'Aufwecken', { detail: 'über den Server' });
   res.json({ ok: true, via: 'Server' });
 }));
 
@@ -365,24 +423,29 @@ app.post('/api/scripts', requireAdmin, wrap(async (req, res) => {
   const s = { id: crypto.randomUUID(), ...validateScript(req.body || {}), createdAt: Date.now() };
   store.data.scripts.push(s);
   store.save();
+  auditReq(req, 'script', 'Skript angelegt', { target: s.name });
   res.json(s);
 }));
 
 app.put('/api/scripts/:sid', requireAdmin, wrap(async (req, res) => {
   const s = store.data.scripts.find((x) => x.id === req.params.sid);
   if (!s) throw httpError(404, 'Skript nicht gefunden');
+  const oldName = s.name;
   Object.assign(s, validateScript(req.body || {}), { updatedAt: Date.now() });
   store.save();
+  auditReq(req, 'script', 'Skript geändert', { target: s.name, detail: oldName !== s.name ? `umbenannt von ${oldName}` : undefined });
   res.json(s);
 }));
 
 app.delete('/api/scripts/:sid', requireAdmin, (req, res) => {
+  const s = store.data.scripts.find((x) => x.id === req.params.sid);
+  if (s) auditReq(req, 'script', 'Skript gelöscht', { target: s.name });
   store.data.scripts = store.data.scripts.filter((x) => x.id !== req.params.sid);
   store.save();
   res.json({ ok: true });
 });
 
-async function runOn(agentId, script) {
+async function runOn(agentId, script, req) {
   const a = store.data.agents[agentId];
   const entry = {
     id: crypto.randomUUID(),
@@ -403,6 +466,14 @@ async function runOn(agentId, script) {
   store.data.history.length = Math.min(store.data.history.length, 300);
   store.save();
   broadcast({ type: 'history' });
+  const adhoc = script.name === 'Ad-hoc';
+  auditReq(req, 'script', adhoc ? 'Befehl ausgeführt' : 'Skript ausgeführt', {
+    agentId, target: entry.hostname,
+    detail: adhoc ? `${script.shell}: ${script.body.slice(0, 2000)}` : `${script.name} (${script.shell})`,
+    ok: !entry.error && !entry.timedOut && entry.exitCode === 0,
+    result: entry.error || (entry.timedOut ? 'Zeitüberschreitung' : `Exit ${entry.exitCode}`),
+    ref: entry.id,
+  });
   return entry;
 }
 
@@ -411,7 +482,7 @@ app.post('/api/agents/:id/run', requireAdmin, wrap(async (req, res) => {
   const a = getAgent(req);
   const s = validateScript({ name: 'Ad-hoc', ...req.body });
   log(`[run] ${s.name} (${s.shell}) -> ${a.info?.hostname}`);
-  res.json(await runOn(a.id, s));
+  res.json(await runOn(a.id, s, req));
 }));
 
 // Bibliotheks-Skript auf mehreren Clients parallel
@@ -421,7 +492,7 @@ app.post('/api/scripts/:sid/run', requireAdmin, wrap(async (req, res) => {
   const ids = Array.isArray(req.body?.agentIds) ? req.body.agentIds : [];
   if (!ids.length) throw httpError(400, 'Keine Clients ausgewählt');
   log(`[run] ${s.name} -> ${ids.length} Client(s)`);
-  res.json(await Promise.all(ids.map((id) => runOn(id, s))));
+  res.json(await Promise.all(ids.map((id) => runOn(id, s, req))));
 }));
 
 app.get('/api/history', requireAdmin, (req, res) => {
@@ -433,7 +504,16 @@ app.get('/api/history', requireAdmin, (req, res) => {
 app.delete('/api/history', requireAdmin, (req, res) => {
   store.data.history = [];
   store.save();
+  auditReq(req, 'settings', 'Skript-Ausgaben gelöscht');
   res.json({ ok: true });
+});
+
+// Nur lesen – Protokolleinträge lassen sich über die API bewusst nicht löschen
+app.get('/api/audit', requireAdmin, (req, res) => {
+  const { cat, agentId, q } = req.query;
+  const before = Number(req.query.before) || 0;
+  const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 20000);
+  res.json(audit.query({ cat, agentId, q, before, limit }));
 });
 
 // ---- Einstellungen & Enrollment ------------------------------------------
@@ -441,12 +521,22 @@ app.get('/api/settings', requireAdmin, (req, res) => res.json(store.data.setting
 
 app.put('/api/settings', requireAdmin, wrap(async (req, res) => {
   const t = req.body?.thresholds || {};
+  const changes = [];
+  const LABELS = { cpu: 'CPU', mem: 'RAM', disk: 'Datenträger' };
   for (const k of ['cpu', 'mem', 'disk']) {
     const v = Number(t[k]);
-    if (v >= 10 && v <= 100) store.data.settings.thresholds[k] = v;
+    const old = store.data.settings.thresholds[k];
+    if (v >= 10 && v <= 100 && v !== old) {
+      store.data.settings.thresholds[k] = v;
+      changes.push(`${LABELS[k]}-Warnung ${old} → ${v} %`);
+    }
   }
-  if (typeof req.body?.autoUpdateAgents === 'boolean') store.data.settings.autoUpdateAgents = req.body.autoUpdateAgents;
+  if (typeof req.body?.autoUpdateAgents === 'boolean' && req.body.autoUpdateAgents !== store.data.settings.autoUpdateAgents) {
+    store.data.settings.autoUpdateAgents = req.body.autoUpdateAgents;
+    changes.push(`Agents automatisch aktualisieren: ${req.body.autoUpdateAgents ? 'an' : 'aus'}`);
+  }
   store.save();
+  if (changes.length) auditReq(req, 'settings', 'Einstellungen geändert', { detail: changes.join(', ') });
   for (const id of Object.keys(store.data.agents)) broadcastAgent(id);
   res.json(store.data.settings);
 }));
@@ -515,21 +605,29 @@ app.post('/api/update/server', requireAdmin, wrap(async (req, res) => {
   fs.writeFileSync(UPDATE_REQUEST, JSON.stringify({ requestedAt: Date.now() }));
   updateRequestedAt = Date.now();
   log('[update] Server-Update angefordert');
+  auditReq(req, 'system', 'Server-Update angefordert', { detail: `aktuell ${SERVER_VERSION.commit}` });
   broadcast({ type: 'server.updating' });
   res.json({ ok: true });
 }));
 
-function updateAgent(id, reason) {
+function updateAgent(id, reason, req) {
   const a = store.data.agents[id];
   if (!a) return Promise.resolve();
   a.lastAutoUpdate = Date.now();
   log(`[update] Agent ${a.info?.hostname || id} wird aktualisiert (${reason})`);
-  return agentRequest(id, 'update', {}, 60000);
+  const entry = { agentId: id, target: agentLabel(a), detail: `${reason}, ${a.version || '?'} → ${agentBundle.version}` };
+  const record = (extra) => (req
+    ? auditReq(req, 'action', 'Agent-Update', { ...entry, ...extra })
+    : audit.add({ cat: 'action', action: 'Agent-Update', actor: 'System', ...entry, ...extra }));
+  return agentRequest(id, 'update', {}, 60000).then(
+    (r) => { record({}); return r; },
+    (e) => { record({ ok: false, result: e.message }); throw e; },
+  );
 }
 
 app.post('/api/update/agents', requireAdmin, wrap(async (req, res) => {
   const ids = [...conns.keys()].filter((id) => store.data.agents[id] && agentOutdated(store.data.agents[id]));
-  const results = await Promise.allSettled(ids.map((id) => updateAgent(id, 'manuell')));
+  const results = await Promise.allSettled(ids.map((id) => updateAgent(id, 'manuell', req)));
   res.json({ requested: ids.length, ok: results.filter((r) => r.status === 'fulfilled').length });
 }));
 
@@ -601,10 +699,13 @@ app.post('/api/tokens', requireAdmin, wrap(async (req, res) => {
   store.data.apiTokens.push(t);
   store.save();
   log(`[api] Zugang angelegt: ${name} (${scopes.join(', ')})`);
+  auditReq(req, 'settings', 'API-Zugang angelegt', { target: name, detail: `Rechte: ${scopes.join(', ')}` });
   res.json({ ...publicToken(t), token }); // Klartext nur dieses eine Mal
 }));
 
 app.delete('/api/tokens/:tid', requireAdmin, (req, res) => {
+  const t = store.data.apiTokens.find((x) => x.id === req.params.tid);
+  if (t) auditReq(req, 'settings', 'API-Zugang gelöscht', { target: t.name });
   store.data.apiTokens = store.data.apiTokens.filter((t) => t.id !== req.params.tid);
   store.save();
   res.json({ ok: true });
@@ -632,8 +733,10 @@ app.post('/api/agents/migrate', requireAdmin, wrap(async (req, res) => {
     if (!versionAtLeast(a.version, '1.2.0')) return { ...base, ok: false, error: 'Agent zu alt – zuerst aktualisieren' };
     try {
       const r = await agentRequest(id, 'setServer', { urls, serverId: store.data.serverId }, 45000);
+      auditAgent(req, a, 'action', 'Server-Adresse umgezogen', { detail: r?.changed ? `${base.from || '?'} → ${r.url}` : `unverändert (${r?.note || r?.url || ''})` });
       return { ...base, ok: true, ...r };
     } catch (e) {
+      auditAgent(req, a, 'action', 'Server-Adresse umgezogen', { detail: urls.join(' | '), ok: false, result: e.message });
       return { ...base, ok: false, error: e.message };
     }
   }));
@@ -643,13 +746,17 @@ app.post('/api/agents/migrate', requireAdmin, wrap(async (req, res) => {
 app.post('/api/enroll/rotate', requireAdmin, (req, res) => {
   store.data.enrollKey = crypto.randomBytes(18).toString('base64url');
   store.save();
+  auditReq(req, 'settings', 'Installationsschlüssel erneuert');
   res.json(enrollInfo(req));
 });
 
 // ---- Öffentlich: Install-Skripte, Agent-Download, Enrollment -------------
 function checkKey(req) {
   const key = String(req.query.key || req.body?.key || '');
-  if (!key || !safeEqual(key, store.data.enrollKey)) throw httpError(403, 'Ungültiger Installationsschlüssel');
+  if (!key || !safeEqual(key, store.data.enrollKey)) {
+    audit.add({ cat: 'auth', action: 'Ungültiger Installationsschlüssel', actor: 'Installationsskript', ip: ipOf(req), detail: req.path, ok: false });
+    throw httpError(403, 'Ungültiger Installationsschlüssel');
+  }
 }
 
 // Der Agent verbindet sich später über genau die Adresse, über die das Skript geladen wurde.
@@ -680,6 +787,7 @@ app.post('/agent/enroll', wrap(async (req, res) => {
   if (!hostname) throw httpError(400, 'hostname fehlt');
   // Neuinstallation auf derselben Maschine übernimmt den bestehenden Eintrag.
   let a = machineId && Object.values(store.data.agents).find((x) => x.machineId === machineId);
+  const known = !!a;
   if (!a) {
     a = { id: crypto.randomUUID(), createdAt: Date.now(), tags: [], notes: '' };
     store.data.agents[a.id] = a;
@@ -694,6 +802,7 @@ app.post('/agent/enroll', wrap(async (req, res) => {
   });
   store.flush();
   log(`[enroll] ${a.hostname} (${a.platform}) -> ${a.id}`);
+  audit.add({ cat: 'connection', action: known ? 'Client neu installiert' : 'Client registriert', actor: 'Installationsskript', ip: ipOf(req), agentId: a.id, target: agentLabel(a), detail: a.platform });
   broadcastAgent(a.id);
   res.json({ id: a.id, secret });
 }));
@@ -716,7 +825,11 @@ server.on('upgrade', (req, socket, head) => {
   if (url.pathname === '/ws/agent') {
     wssAgent.handleUpgrade(req, socket, head, (ws) => wssAgent.emit('connection', ws, req));
   } else if (url.pathname === '/ws/admin' && validSession(url.searchParams.get('token'))) {
-    wssAdmin.handleUpgrade(req, socket, head, (ws) => wssAdmin.emit('connection', ws, req));
+    const session = noteDevice(validSession(url.searchParams.get('token')), url.searchParams.get('device'));
+    wssAdmin.handleUpgrade(req, socket, head, (ws) => {
+      ws.session = session;
+      wssAdmin.emit('connection', ws, req);
+    });
   } else {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
@@ -741,6 +854,7 @@ wssAgent.on('connection', (ws, req) => {
     if (!agentId) {
       const a = msg.type === 'hello' && store.data.agents[msg.id];
       if (!a || !a.secretHash || !safeEqual(sha256hex(msg.secret || ''), a.secretHash)) {
+        audit.add({ cat: 'connection', action: 'Agent abgewiesen', actor: 'Agent', ip: clientIp(req), agentId: a ? a.id : undefined, target: a ? agentLabel(a) : String(msg.id || '').slice(0, 64), detail: a ? 'Falsches Geheimnis' : 'Unbekannter oder entfernter Client', ok: false });
         sendJson(ws, { type: 'denied', reason: a ? 'secret' : 'unknown' });
         ws.close(4003, 'denied');
         return;
@@ -758,6 +872,7 @@ wssAgent.on('connection', (ws, req) => {
         setTimeout(() => updateAgent(id, 'automatisch').catch((e) => log(`[update] Agent-Update fehlgeschlagen: ${e.message}`)), 3000);
       }
       log(`[agent] online: ${a.info?.hostname} (${clientIp(req)})`);
+      audit.add({ cat: 'connection', action: 'Online', actor: 'Agent', ip: clientIp(req), agentId, target: agentLabel(a), detail: `Agent ${msg.version || '?'}` });
       broadcastAgent(agentId);
       return;
     }
@@ -777,7 +892,7 @@ wssAgent.on('connection', (ws, req) => {
     for (const [sid, s] of shells) {
       if (s.agentId === agentId) {
         sendJson(s.adminWs, { type: 'shell.exit', sid, code: null });
-        shells.delete(sid);
+        endShell(sid, 'Verbindung zum Client getrennt');
       }
     }
     const a = store.data.agents[agentId];
@@ -785,6 +900,7 @@ wssAgent.on('connection', (ws, req) => {
       a.lastSeen = Date.now();
       store.save();
       log(`[agent] offline: ${a.info?.hostname}`);
+      audit.add({ cat: 'connection', action: 'Offline', actor: 'Agent', ip: clientIp(req), agentId, target: agentLabel(a) });
       broadcastAgent(agentId);
     }
   });
@@ -824,13 +940,27 @@ function handleAgentMessage(agentId, msg) {
       const s = shells.get(msg.sid);
       if (!s || s.agentId !== agentId) return;
       sendJson(s.adminWs, msg);
-      if (msg.type === 'shell.exit') shells.delete(msg.sid);
+      if (msg.type === 'shell.exit') endShell(msg.sid, msg.code != null ? `beendet (Code ${msg.code})` : 'beendet');
       break;
     }
   }
 }
 
-wssAdmin.on('connection', (ws) => {
+// Terminal-Sitzungen protokollieren (nur Öffnen/Schließen – Eingaben nicht, darin können Passwörter stehen)
+function endShell(sid, reason) {
+  const s = shells.get(sid);
+  if (!s) return;
+  shells.delete(sid);
+  if (!s.openedAt) return;
+  const a = store.data.agents[s.agentId];
+  const secs = Math.round((Date.now() - s.openedAt) / 1000);
+  const dur = secs >= 60 ? `${Math.floor(secs / 60)} min ${secs % 60} s` : `${secs} s`;
+  audit.add({ cat: 'shell', action: 'Terminal geschlossen', actor: s.actor, ip: s.ip, agentId: s.agentId, target: agentLabel(a) || s.agentId, detail: `${reason}, Dauer ${dur}` });
+}
+
+wssAdmin.on('connection', (ws, req) => {
+  const wsActor = ws.session?.device ? `Admin (${ws.session.device})` : 'Admin';
+  const wsIp = clientIp(req);
   ws.isAlive = true;
   ws.on('pong', () => (ws.isAlive = true));
   admins.add(ws);
@@ -843,14 +973,19 @@ wssAdmin.on('connection', (ws) => {
     switch (msg.type) {
       case 'shell.open': {
         if (!msg.sid || shells.has(msg.sid)) return;
-        shells.set(msg.sid, { adminWs: ws, agentId: msg.agentId });
+        shells.set(msg.sid, { adminWs: ws, agentId: msg.agentId, actor: wsActor, ip: wsIp });
+        const a = store.data.agents[msg.agentId];
         try {
           const r = await agentRequest(msg.agentId, 'shell.open', { sid: msg.sid, cols: msg.cols, rows: msg.rows });
           sendJson(ws, { type: 'shell.opened', sid: msg.sid, mode: r.mode, shell: r.shell });
-          log(`[shell] geöffnet auf ${store.data.agents[msg.agentId]?.info?.hostname}`);
+          log(`[shell] geöffnet auf ${a?.info?.hostname}`);
+          const s = shells.get(msg.sid);
+          if (s) s.openedAt = Date.now();
+          audit.add({ cat: 'shell', action: 'Terminal geöffnet', actor: wsActor, ip: wsIp, agentId: msg.agentId, target: agentLabel(a) || msg.agentId, detail: r.shell });
         } catch (e) {
           shells.delete(msg.sid);
           sendJson(ws, { type: 'shell.error', sid: msg.sid, error: e.message });
+          audit.add({ cat: 'shell', action: 'Terminal geöffnet', actor: wsActor, ip: wsIp, agentId: msg.agentId, target: agentLabel(a) || msg.agentId, ok: false, result: e.message });
         }
         break;
       }
@@ -858,7 +993,7 @@ wssAdmin.on('connection', (ws) => {
       case 'shell.close':
         if (!s || s.adminWs !== ws) return;
         sendJson(conns.get(s.agentId)?.ws, msg);
-        if (msg.type === 'shell.close') shells.delete(msg.sid);
+        if (msg.type === 'shell.close') endShell(msg.sid, 'geschlossen');
         break;
     }
   });
@@ -868,7 +1003,7 @@ wssAdmin.on('connection', (ws) => {
     for (const [sid, s] of shells) {
       if (s.adminWs === ws) {
         sendJson(conns.get(s.agentId)?.ws, { type: 'shell.close', sid });
-        shells.delete(sid);
+        endShell(sid, 'App getrennt');
       }
     }
   });
@@ -898,4 +1033,5 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 
 server.listen(PORT, HOST, () => {
   log(`[bolzo-rmm] Server läuft auf http://${HOST}:${PORT}  (Daten: ${DATA_DIR})`);
+  audit.add({ cat: 'system', action: 'Server gestartet', actor: 'System', detail: `Version ${SERVER_VERSION.commit}${SERVER_VERSION.message ? ` – ${SERVER_VERSION.message}` : ''}` });
 });

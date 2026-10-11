@@ -21,7 +21,12 @@ Ports geöffnet werden, und sie funktionieren auch hinter NAT.
 - **Neustart / Herunterfahren / Wake-on-LAN** (WoL wird über einen anderen Client im selben Netz gesendet)
 - **Prozesse** anzeigen und beenden, **Dienste** starten/stoppen/neu starten (systemd bzw. Windows-Dienste)
 - **Skript-Bibliothek** (Bash, sh, PowerShell, CMD, Python) und Ausführung auf **mehreren Clients gleichzeitig**
-- **Verlauf** aller Skriptausführungen inkl. Ausgabe und Exit-Code
+- **Protokoll (Audit-Log)** unter Verlauf: wer hat wann was getan – Anmeldungen (auch fehlgeschlagene),
+  Neustart/Herunterfahren, Befehle und Skripte, Terminal-Sitzungen, Prozesse/Dienste, Einstellungen,
+  API-Zugänge (z.B. Telefon), Updates, Online/Offline. Mit Filter, Suche und CSV-Export. Der Server hängt
+  jeden Eintrag an `/var/lib/bolzo-rmm/audit.jsonl` an; aus der App lässt sich das Protokoll nicht löschen.
+  Terminal-Eingaben werden bewusst nicht mitgeschrieben (darin können Passwörter stehen).
+- **Skript-Ausgaben** der letzten 300 Ausführungen inkl. Ausgabe und Exit-Code
 - **Tags, Notizen, Umbenennen** pro Client
 - **Warnschwellen** für CPU/RAM/Disk und **Windows-Benachrichtigungen**, wenn ein Client offline geht
 - **Install-Einzeiler** für neue Clients (Linux + Windows) direkt aus der App kopierbar

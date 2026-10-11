@@ -5,7 +5,7 @@ import {
 } from '../ui.js';
 import { lineChart } from '../charts.js';
 import { RemoteTerminal } from '../terminal.js';
-import { showRunResult } from './history.js';
+import { showRunResult, renderAuditLog } from './history.js';
 
 const TABS = [
   { key: 'overview', label: 'Übersicht', icon: 'activity' },
@@ -14,6 +14,7 @@ const TABS = [
   { key: 'services', label: 'Dienste', icon: 'box' },
   { key: 'scripts', label: 'Skripte', icon: 'code' },
   { key: 'notes', label: 'Notizen', icon: 'note' },
+  { key: 'audit', label: 'Protokoll', icon: 'shield' },
 ];
 
 export function renderClient(root, { go, params }) {
@@ -137,7 +138,7 @@ export function renderClient(root, { go, params }) {
     cleanupTab?.();
     const body = $('[data-body]', root);
     body.innerHTML = '';
-    cleanupTab = { overview, terminal, processes, services, scripts, notes }[key](body) || null;
+    cleanupTab = { overview, terminal, processes, services, scripts, notes, audit }[key](body) || null;
   }
   $$('[data-tab]', root).forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
 
@@ -301,7 +302,7 @@ export function renderClient(root, { go, params }) {
       if (!b) return;
       if (!(await confirmDialog({ title: 'Prozess beenden?', text: `<b>${esc(b.dataset.name)}</b> (PID ${b.dataset.kill}) wird sofort beendet.`, okText: 'Beenden', danger: true }))) return;
       try {
-        await api.action(id, 'kill', { pid: Number(b.dataset.kill) });
+        await api.action(id, 'kill', { pid: Number(b.dataset.kill), name: b.dataset.name });
         toast('Prozess beendet');
         load();
       } catch (err) { toast(err.message, 'err'); }
@@ -447,6 +448,11 @@ export function renderClient(root, { go, params }) {
     }
     loadHist();
     return api.on('history', loadHist);
+  }
+
+  // Protokoll: alles, was mit diesem Client passiert ist
+  function audit(body) {
+    return renderAuditLog(body, { agentId: id });
   }
 
   // Notizen
