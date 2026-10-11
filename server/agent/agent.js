@@ -8,7 +8,7 @@ const cp = require('child_process');
 const crypto = require('crypto');
 const dgram = require('dgram');
 
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -478,6 +478,7 @@ function uninstall() {
 // Verbindung zum Server
 // ---------------------------------------------------------------------------
 let ws = null;
+let wsSince = 0; // seit wann die aktuelle Verbindung aufgebaut wird bzw. besteht
 let lastServerMsg = Date.now();
 
 // ---------------------------------------------------------------------------
@@ -511,7 +512,7 @@ async function setServer({ urls, serverId }) {
     saveCfg();
     log(`Server-Adresse gewechselt auf ${url} (vorher ${cfg.pendingSwitch.previous})`);
     // Antwort noch über die alte Verbindung senden lassen, dann neu verbinden
-    setTimeout(() => ws?.close(), 500);
+    setTimeout(() => ws?.abandon(), 500);
     return { changed: true, url, tried };
   }
   return { changed: false, url: cfg.server, tried, note: 'keine der Adressen erreichbar – alte Adresse bleibt' };
@@ -589,21 +590,56 @@ async function enroll() {
 }
 
 let backoff = 2000;
+let failedSince = 0;
 function connect() {
   const url = cfg.server.replace(/^http/, 'ws') + '/ws/agent';
-  ws = new WebSocket(url);
+  const sock = new WebSocket(url);
+  ws = sock;
+  wsSince = Date.now();
   let welcomed = false;
+  let finished = false;
 
-  ws.onopen = async () => {
+  // Verbindung endgültig aufgeben und neu verbinden – auch wenn der Socket im Auf- oder
+  // Abbau hängen bleibt und nie ein close-Ereignis liefert (z.B. Server mitten im Neustart).
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    sock.onopen = sock.onmessage = sock.onerror = sock.onclose = null;
+    if (ws === sock) ws = null;
+    for (const sid of [...shells.keys()]) closeShell(sid);
+    // Nach einem Umzug: kommt keine Verbindung zustande, zurück zur alten Adresse
+    if (!welcomed && cfg.pendingSwitch && ++cfg.pendingSwitch.failures >= 4) {
+      log(`Neue Adresse ${cfg.server} nicht erreichbar – zurück zu ${cfg.pendingSwitch.previous}`);
+      cfg.server = cfg.pendingSwitch.previous;
+      delete cfg.pendingSwitch;
+      saveCfg();
+      backoff = 2000;
+    }
+    if (welcomed) failedSince = 0;
+    else if (!failedSince) {
+      failedSince = Date.now();
+      log(`Keine Verbindung zu ${cfg.server} – versuche es weiter`);
+    }
+    const wait = welcomed ? 2000 : backoff;
+    if (!welcomed) backoff = Math.min(backoff * 2, 60000);
+    setTimeout(connect, wait);
+  };
+  sock.abandon = () => {
+    try { sock.close(); } catch {}
+    finish();
+  };
+
+  sock.onopen = async () => {
     lastServerMsg = Date.now();
     send({ type: 'hello', id: cfg.id, secret: cfg.secret, version: VERSION, hash: CODE_HASH, serverUrl: cfg.server, info: await getInfo() });
   };
-  ws.onmessage = (e) => {
+  sock.onmessage = (e) => {
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.type === 'welcome') {
       welcomed = true;
       backoff = 2000;
+      failedSince = 0;
       log(`Verbunden mit ${cfg.server}`);
       if (cfg.pendingSwitch) {
         delete cfg.pendingSwitch; // Umzug bestätigt
@@ -619,22 +655,8 @@ function connect() {
     }
     handle(msg);
   };
-  ws.onclose = () => {
-    for (const sid of [...shells.keys()]) closeShell(sid);
-    ws = null;
-    // Nach einem Umzug: kommt keine Verbindung zustande, zurück zur alten Adresse
-    if (!welcomed && cfg.pendingSwitch && ++cfg.pendingSwitch.failures >= 4) {
-      log(`Neue Adresse ${cfg.server} nicht erreichbar – zurück zu ${cfg.pendingSwitch.previous}`);
-      cfg.server = cfg.pendingSwitch.previous;
-      delete cfg.pendingSwitch;
-      saveCfg();
-      backoff = 2000;
-    }
-    const wait = welcomed ? 2000 : backoff;
-    if (!welcomed) backoff = Math.min(backoff * 2, 60000);
-    setTimeout(connect, wait);
-  };
-  ws.onerror = () => {};
+  sock.onclose = finish;
+  sock.onerror = () => {};
 }
 
 async function main() {
@@ -664,9 +686,13 @@ async function main() {
   setInterval(async () => send({ type: 'info', info: await getInfo() }), 10 * 60e3);
   // Hängende Verbindung erkennen (Server schickt alle 30 s ein Ping)
   setInterval(() => {
-    if (ws && ws.readyState === 1 && Date.now() - lastServerMsg > 95000) {
+    if (!ws) return;
+    if (ws.readyState === 1 && Date.now() - lastServerMsg > 95000) {
       log('Keine Nachricht vom Server seit 95 s – verbinde neu');
-      ws.close();
+      ws.abandon();
+    } else if (ws.readyState !== 1 && Date.now() - wsSince > 60000) {
+      log('Verbindungsaufbau hängt seit 60 s – verbinde neu');
+      ws.abandon();
     }
   }, 15000);
 }
