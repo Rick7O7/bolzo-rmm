@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -17,6 +17,13 @@ const IS_WIN = process.platform === 'win32';
 const TEST_PVE = !!process.env.BOLZO_TEST_VNC;
 const IS_PVE = TEST_PVE || (!IS_WIN && fs.existsSync('/usr/bin/pvesh'));
 const pveNode = () => os.hostname().split('.')[0];
+// Der Agent-Dienst hat ein Speicherlimit (MemoryMax), das auch für alle gestarteten Programme gilt.
+// Die Proxmox-Werkzeuge (Perl, je ~100 MB) würden daran ersticken: auf Proxmox-Hosts deshalb
+// Proxmox-Befehle, Skripte und Terminals in einem eigenen Scope außerhalb des Agent-Limits starten.
+const SCOPE = IS_PVE && !TEST_PVE && fs.existsSync('/usr/bin/systemd-run');
+const SCOPE_PREFIX = ['systemd-run', '--scope', '--quiet', '--collect'];
+const outside = (cmd, args) => (SCOPE ? [SCOPE_PREFIX[0], [...SCOPE_PREFIX.slice(1), cmd, ...args]] : [cmd, args]);
+const outsideSh = (cmdline) => (SCOPE ? `${SCOPE_PREFIX.join(' ')} ${cmdline}` : cmdline);
 const CFG_PATH = process.env.RMM_AGENT_CONFIG || path.join(__dirname, 'config.json');
 const METRICS_INTERVAL = 5000;
 const DISK_INTERVAL = 30000;
@@ -106,7 +113,7 @@ async function getStaticInfo() {
   let proxmox;
   if (TEST_PVE) proxmox = { node: 'test', version: 'Testmodus' };
   else if (IS_PVE) {
-    const v = (await exec('pveversion', [])).stdout.match(/pve-manager\/([^/\s]+)/);
+    const v = (await exec(...outside('pveversion', []))).stdout.match(/pve-manager\/([^/\s]+)/);
     proxmox = { node: pveNode(), version: v ? v[1] : '' };
   }
   staticInfo = { os: osName, model, proxmox };
@@ -328,7 +335,7 @@ function runScript({ body, shell, timeout = 300 }) {
       sh: ['sh', [file]],
       python: [IS_WIN ? 'python' : 'python3', [file]],
     };
-    const [cmd, args] = cmds[shell];
+    const [cmd, args] = outside(...cmds[shell]);
     const start = Date.now();
     let output = '';
     let timedOut = false;
@@ -403,7 +410,7 @@ async function openShell({ sid, cols = 120, rows = 30, lxc }) {
     const env = { ...process.env, TERM: 'xterm-256color', HOME: os.homedir(), LANG: process.env.LANG || 'C.UTF-8' };
     if (hasScriptCmd) {
       // "script" stellt ein echtes Pseudo-Terminal bereit -> vim, top, htop funktionieren
-      const target = lxc != null ? `pct enter ${lxc}` : `${sh} -l`;
+      const target = outsideSh(lxc != null ? `pct enter ${lxc}` : `${sh} -l`);
       child = cp.spawn('script', ['-qfc', `stty cols ${cols} rows ${rows} 2>/dev/null; exec ${target}`, '/dev/null'], { cwd: os.homedir(), env, detached: true });
       mode = 'pty';
     } else if (lxc != null) {
@@ -450,7 +457,7 @@ function checkGuest({ vmid, type }) {
 
 async function pvesh(method, apiPath, args = [], timeout = 60000) {
   if (!IS_PVE) throw new Error('Kein Proxmox-Host');
-  const r = await exec('pvesh', [method, apiPath, ...args, '--output-format', 'json'], { timeout });
+  const r = await exec(...outside('pvesh', [method, apiPath, ...args, '--output-format', 'json']), { timeout });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split('\n').pop() || 'pvesh-Fehler');
   try { return JSON.parse(r.stdout || 'null'); } catch { return r.stdout.trim(); }
 }
@@ -485,7 +492,7 @@ async function pvePower(p) {
   if (!PVE_OPS.includes(p.op)) throw new Error('Unbekannte Aktion');
   if (!IS_PVE) throw new Error('Kein Proxmox-Host');
   if (TEST_PVE) return { ok: true, test: true };
-  const child = cp.spawn('pvesh', ['create', `/nodes/${pveNode()}/${type}/${vmid}/status/${p.op}`], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = cp.spawn(...outside('pvesh', ['create', `/nodes/${pveNode()}/${type}/${vmid}/status/${p.op}`]), { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
   child.stderr.on('data', (d) => (out += d));
