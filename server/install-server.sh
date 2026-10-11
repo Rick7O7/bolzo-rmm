@@ -37,7 +37,7 @@ if [ ! -x "$APP/node/bin/node" ]; then
 fi
 
 info "Kopiere Programmdateien nach $APP ..."
-cp -r "$SRC/server.js" "$SRC/store.js" "$SRC/package.json" "$SRC/agent" "$SRC/templates" "$APP/"
+cp -r "$SRC"/*.js "$SRC/package.json" "$SRC/agent" "$SRC/templates" "$APP/"
 [ -f "$SRC/package-lock.json" ] && cp "$SRC/package-lock.json" "$APP/"
 # Versionsinfo für die Update-Anzeige in der App (von install.sh übergeben)
 COMMIT="${BOLZO_RMM_COMMIT:-unbekannt}" DATE="${BOLZO_RMM_DATE:-}" MESSAGE="${BOLZO_RMM_MESSAGE:-manuelle Installation}" \
