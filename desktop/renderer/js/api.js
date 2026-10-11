@@ -16,6 +16,7 @@ class Api extends EventTarget {
     this.token = LS.get('token', '');
     this.agents = new Map();
     this.settings = { thresholds: { cpu: 90, mem: 90, disk: 90 } };
+    this.folders = []; // Ordnerstruktur für Clients
     this.connected = false;
     this.ws = null;
     this._retry = null;
@@ -124,7 +125,9 @@ class Api extends EventTarget {
         this.agents.clear();
         for (const a of msg.agents) this.agents.set(a.id, a);
         this.settings = msg.settings;
+        this.folders = msg.folders || [];
         this.emit('agents');
+        this.emit('folders');
         break;
       case 'agent': {
         const prev = this.agents.get(msg.agent.id);
@@ -151,6 +154,10 @@ class Api extends EventTarget {
       }
       case 'history':
         this.emit('history');
+        break;
+      case 'folders':
+        this.folders = msg.folders || [];
+        this.emit('folders');
         break;
       case 'audit':
         this.emit('audit', msg.entry);

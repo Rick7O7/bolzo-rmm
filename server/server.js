@@ -96,6 +96,7 @@ function summarize(a, withSpark = false) {
     serverUrl: a.serverUrl || '',
     publicIp: a.publicIp || '',
     pve: a.pve ? { ...a.pve, hostName: agentLabel(store.data.agents[a.pve.hostId]) || '?', hostOnline: conns.has(a.pve.hostId) } : null,
+    folderId: a.folderId || null,
     createdAt: a.createdAt,
     lastSeen: online ? Date.now() : a.lastSeen,
     online,
@@ -594,6 +595,205 @@ app.post('/api/agents/:id/pve/console', requireAdmin, wrap(async (req, res) => {
   res.json({ sid, password: r?.password || null });
 }));
 
+// ---- Ordner für Clients -----------------------------------------------------
+const folderById = (id) => store.data.folders.find((f) => f.id === id);
+const broadcastFolders = () => broadcast({ type: 'folders', folders: store.data.folders });
+function folderPath(id) {
+  const parts = [];
+  for (let f = folderById(id), guard = 0; f && guard < 50; f = folderById(f.parentId), guard++) parts.unshift(f.name);
+  return parts.join(' / ');
+}
+const isDescendant = (id, ancestor) => {
+  for (let f = folderById(id), guard = 0; f && guard < 50; f = folderById(f.parentId), guard++) if (f.id === ancestor) return true;
+  return false;
+};
+// Symbol und Farbe eines Ordners (Symbolnamen kommen aus der App, Farbe als #rrggbb)
+function folderStyle(body, f) {
+  if (body?.icon !== undefined) {
+    const ic = String(body.icon || '');
+    if (ic && !/^[a-zA-Z]{2,20}$/.test(ic)) throw httpError(400, 'Ungültiges Symbol');
+    f.icon = ic || undefined;
+  }
+  if (body?.color !== undefined) {
+    const c = String(body.color || '');
+    if (c && !/^#[0-9a-fA-F]{6}$/.test(c)) throw httpError(400, 'Ungültige Farbe');
+    f.color = c || undefined;
+  }
+}
+const folderName = (v) => {
+  const n = String(v || '').trim().slice(0, 60);
+  if (!n) throw httpError(400, 'Name fehlt');
+  return n;
+};
+
+app.get('/api/folders', requireAdmin, (req, res) => res.json(store.data.folders));
+
+app.post('/api/folders', requireAdmin, wrap(async (req, res) => {
+  const parentId = req.body?.parentId || null;
+  if (parentId && !folderById(parentId)) throw httpError(400, 'Übergeordneter Ordner nicht gefunden');
+  const f = { id: crypto.randomUUID(), name: folderName(req.body?.name), parentId, createdAt: Date.now() };
+  folderStyle(req.body, f);
+  store.data.folders.push(f);
+  store.save();
+  auditReq(req, 'client', 'Ordner angelegt', { target: folderPath(f.id) });
+  broadcastFolders();
+  res.json(f);
+}));
+
+app.patch('/api/folders/:fid', requireAdmin, wrap(async (req, res) => {
+  const f = folderById(req.params.fid);
+  if (!f) throw httpError(404, 'Ordner nicht gefunden');
+  const before = folderPath(f.id);
+  if (req.body?.name !== undefined) f.name = folderName(req.body.name);
+  folderStyle(req.body, f);
+  if (req.body?.parentId !== undefined) {
+    const pid = req.body.parentId || null;
+    if (pid && (!folderById(pid) || pid === f.id || isDescendant(pid, f.id))) throw httpError(400, 'Ein Ordner kann nicht in sich selbst verschoben werden');
+    f.parentId = pid;
+  }
+  store.save();
+  auditReq(req, 'client', 'Ordner geändert', { target: folderPath(f.id), detail: before !== folderPath(f.id) ? `vorher: ${before}` : undefined });
+  broadcastFolders();
+  res.json(f);
+}));
+
+// Löschen: Unterordner und Clients wandern eine Ebene nach oben
+app.delete('/api/folders/:fid', requireAdmin, (req, res) => {
+  const f = folderById(req.params.fid);
+  if (!f) return res.json({ ok: true });
+  const path = folderPath(f.id);
+  for (const c of store.data.folders) if (c.parentId === f.id) c.parentId = f.parentId;
+  for (const a of Object.values(store.data.agents)) {
+    if (a.folderId === f.id) { a.folderId = f.parentId || undefined; broadcastAgent(a.id); }
+  }
+  store.data.folders = store.data.folders.filter((x) => x.id !== f.id);
+  store.save();
+  auditReq(req, 'client', 'Ordner gelöscht', { target: path });
+  broadcastFolders();
+  res.json({ ok: true });
+});
+
+// Mehrere Clients in einen Ordner verschieben (folderId null = ohne Ordner)
+app.post('/api/agents/move', requireAdmin, wrap(async (req, res) => {
+  const folderId = req.body?.folderId || null;
+  if (folderId && !folderById(folderId)) throw httpError(400, 'Ordner nicht gefunden');
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).filter((id) => store.data.agents[id]);
+  for (const id of ids) {
+    store.data.agents[id].folderId = folderId || undefined;
+    broadcastAgent(id);
+  }
+  store.save();
+  if (ids.length) auditReq(req, 'client', 'In Ordner verschoben', { target: ids.map((id) => agentLabel(store.data.agents[id])).join(', ').slice(0, 300), detail: folderId ? folderPath(folderId) : 'ohne Ordner' });
+  res.json({ ok: true, moved: ids.length });
+}));
+
+// ---- Dateimanager ------------------------------------------------------------
+// Auflisten/Anlegen/Umbenennen/Löschen gehen direkt an den Agent. Übertragungen laufen über
+// einen eigenen Tunnel: Hochladen per WebSocket (/ws/stream, kein Größenlimit durch nginx),
+// Herunterladen als HTTP-Antwort – mit einem kurzlebigen Schlüssel in der Adresse, damit
+// Dateien auch per Drag & Drop aus der App auf den Desktop gezogen werden können.
+const FS_CALLS = {
+  list: { action: 'fs.list' },
+  mkdir: { action: 'fs.mkdir', audit: 'Ordner angelegt (Dateien)', detail: (p) => p.path },
+  rename: { action: 'fs.rename', audit: 'Datei umbenannt', detail: (p) => `${p.from} → ${p.name}` },
+  delete: { action: 'fs.delete', audit: 'Dateien gelöscht', detail: (p) => (p.paths || []).join(', ').slice(0, 500) },
+};
+const dlKeys = new Map(); // key -> { agentId, exp }
+function dlKeyFor(agentId) {
+  const now = Date.now();
+  for (const [k, v] of dlKeys) if (v.exp < now) dlKeys.delete(k);
+  const key = crypto.randomBytes(18).toString('base64url');
+  dlKeys.set(key, { agentId, exp: now + 30 * 60e3 });
+  return key;
+}
+
+app.post('/api/agents/:id/files', requireAdmin, wrap(async (req, res) => {
+  const a = getAgent(req);
+  const { op, ...params } = req.body || {};
+  const def = FS_CALLS[op];
+  if (!def) throw httpError(400, 'Unbekannte Dateiaktion');
+  try {
+    const r = await agentRequest(a.id, def.action, params, 60000);
+    if (def.audit) auditAgent(req, a, 'action', def.audit, { detail: def.detail(params) });
+    res.json(op === 'list' ? { ...r, dlKey: dlKeyFor(a.id) } : r);
+  } catch (e) {
+    if (def.audit) auditAgent(req, a, 'action', def.audit, { detail: def.detail(params), ok: false, result: e.message });
+    throw e;
+  }
+}));
+
+// Hochladen vorbereiten: Agent öffnet den Tunnel, die App schickt danach über /ws/stream
+app.post('/api/agents/:id/files/upload', requireAdmin, wrap(async (req, res) => {
+  const a = getAgent(req);
+  const { dir, name, size } = req.body || {};
+  const sid = crypto.randomUUID();
+  const t = { hostId: a.id, agentWs: null, adminWs: null, toAdmin: [], toAgent: [] };
+  t.timer = setTimeout(() => closeTunnel(sid, 'nicht verbunden'), 30000);
+  tunnels.set(sid, t);
+  try {
+    await agentRequest(a.id, 'fs.upload', { sid, dir, name, size }, 30000);
+  } catch (e) {
+    closeTunnel(sid);
+    throw e;
+  }
+  auditAgent(req, a, 'action', 'Datei hochgeladen', { detail: `${dir}${dir && !/[\\/]$/.test(dir) ? '/' : ''}${name} (${Math.round((Number(size) || 0) / 1024)} KB)` });
+  res.json({ sid });
+}));
+
+// Herunterladen: GET mit Schlüssel statt Anmeldung (für Drag & Drop auf den Desktop)
+app.get('/api/files/dl', wrap(async (req, res) => {
+  const k = dlKeys.get(String(req.query.key || ''));
+  const agentId = String(req.query.agent || '');
+  if (!k || k.exp < Date.now() || k.agentId !== agentId) throw httpError(403, 'Download-Link abgelaufen – Ordner in der App neu laden');
+  const a = store.data.agents[agentId];
+  if (!a || !conns.has(agentId)) throw httpError(409, 'Client ist offline');
+  const filePath = String(req.query.path || '');
+  const sid = crypto.randomUUID();
+  let ready = false;
+  let headersSet = false;
+  let written = 0;
+  const t = { hostId: agentId, agentWs: null, adminWs: null, toAdmin: [], toAgent: [] };
+  const go = () => { if (ready && headersSet && t.agentWs?.readyState === 1) t.agentWs.send('go'); };
+  t.onAgent = () => { ready = true; go(); };
+  t.sink = (data, isBinary) => {
+    if (isBinary) {
+      res.write(data, () => {
+        written += data.length;
+        if (t.agentWs?.readyState === 1) t.agentWs.send(JSON.stringify({ ack: written }));
+      });
+      return;
+    }
+    let m = {};
+    try { m = JSON.parse(data); } catch {}
+    if (m.eof || m.error) {
+      if (m.error && !res.headersSent) res.status(500).json({ error: m.error });
+      else res.end();
+      closeTunnel(sid);
+    }
+  };
+  t.timer = setTimeout(() => closeTunnel(sid, 'nicht verbunden'), 60000);
+  tunnels.set(sid, t);
+  req.on('close', () => { if (!res.writableEnded) closeTunnel(sid); });
+  let info;
+  try {
+    info = await agentRequest(agentId, 'fs.download', { sid, path: filePath }, 30000);
+  } catch (e) {
+    closeTunnel(sid);
+    throw e;
+  }
+  clearTimeout(t.timer);
+  res.set({
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': String(info.size),
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(info.name)}`,
+    'Cache-Control': 'no-store',
+  });
+  res.flushHeaders();
+  headersSet = true;
+  audit.add({ cat: 'action', action: 'Datei heruntergeladen', actor: 'Admin', ip: ipOf(req), agentId, target: agentLabel(a), detail: `${filePath} (${Math.round(info.size / 1024)} KB)` });
+  go();
+}));
+
 // ---- Skripte --------------------------------------------------------------
 const SHELLS = new Set(['powershell', 'cmd', 'bash', 'sh', 'python']);
 
@@ -1020,7 +1220,7 @@ server.on('upgrade', (req, socket, head) => {
     wssAgent.handleUpgrade(req, socket, head, (ws) => wssAgent.emit('connection', ws, req));
   } else if (url.pathname === '/ws/tunnel') {
     wssTunnel.handleUpgrade(req, socket, head, (ws) => tunnelAgentSide(ws));
-  } else if (url.pathname === '/ws/console' && validSession(url.searchParams.get('token')) && tunnels.get(url.searchParams.get('sid'))?.adminWs === null) {
+  } else if ((url.pathname === '/ws/console' || url.pathname === '/ws/stream') && validSession(url.searchParams.get('token')) && tunnels.get(url.searchParams.get('sid'))?.adminWs === null) {
     const sid = url.searchParams.get('sid');
     wssTunnel.handleUpgrade(req, socket, head, (ws) => tunnelAdminSide(ws, sid));
   } else if (url.pathname === '/ws/admin' && validSession(url.searchParams.get('token'))) {
@@ -1055,13 +1255,15 @@ function tunnelAgentSide(ws) {
       clearTimeout(timer);
       sid = m.sid;
       t.agentWs = ws;
-      for (const d of t.toAgent.splice(0)) ws.send(d, { binary: true });
+      for (const [d, b] of t.toAgent.splice(0)) ws.send(d, { binary: b });
+      t.onAgent?.(ws);
       return;
     }
     const t = tunnels.get(sid);
-    if (!t || !isBinary) return;
-    if (t.adminWs?.readyState === 1) t.adminWs.send(data, { binary: true });
-    else t.toAdmin.push(data);
+    if (!t) return;
+    if (t.sink) return t.sink(data, isBinary); // z.B. Datei-Download direkt in die HTTP-Antwort
+    if (t.adminWs?.readyState === 1) t.adminWs.send(data, { binary: isBinary });
+    else t.toAdmin.push([data, isBinary]);
   });
   ws.on('close', () => { clearTimeout(timer); if (sid) closeTunnel(sid, 'von der VM getrennt'); });
   ws.on('error', () => {});
@@ -1074,10 +1276,10 @@ function tunnelAdminSide(ws, sid) {
   clearTimeout(t.timer);
   t.adminWs = ws;
   t.connectedAt = Date.now();
-  for (const d of t.toAdmin.splice(0)) ws.send(d, { binary: true });
-  ws.on('message', (data) => {
-    if (t.agentWs?.readyState === 1) t.agentWs.send(data, { binary: true });
-    else t.toAgent.push(data);
+  for (const [d, b] of t.toAdmin.splice(0)) ws.send(d, { binary: b });
+  ws.on('message', (data, isBinary) => {
+    if (t.agentWs?.readyState === 1) t.agentWs.send(data, { binary: isBinary });
+    else t.toAgent.push([data, isBinary]);
   });
   ws.on('close', () => closeTunnel(sid, 'geschlossen'));
   ws.on('error', () => {});
@@ -1211,7 +1413,7 @@ wssAdmin.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.on('pong', () => (ws.isAlive = true));
   admins.add(ws);
-  sendJson(ws, { type: 'hello', agents: Object.values(store.data.agents).map((a) => summarize(a, true)), settings: store.data.settings });
+  sendJson(ws, { type: 'hello', agents: Object.values(store.data.agents).map((a) => summarize(a, true)), settings: store.data.settings, folders: store.data.folders });
 
   ws.on('message', async (raw) => {
     let msg;

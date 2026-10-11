@@ -7,6 +7,8 @@ import { lineChart } from '../charts.js';
 import { RemoteTerminal } from '../terminal.js';
 import { showRunResult, renderAuditLog } from './history.js';
 import { assignDialog, openConsole, pvePower, renderProxmoxHost } from '../proxmox.js';
+import { renderFiles } from '../files.js';
+import { moveMenu, folderById, folderPath } from '../folders.js';
 
 const TABS = [
   { key: 'overview', label: 'Übersicht', icon: 'activity' },
@@ -15,6 +17,7 @@ const TABS = [
   { key: 'services', label: 'Dienste', icon: 'box' },
   { key: 'scripts', label: 'Skripte', icon: 'code' },
   { key: 'notes', label: 'Notizen', icon: 'note' },
+  { key: 'files', label: 'Dateien', icon: 'folder' },
   { key: 'audit', label: 'Protokoll', icon: 'shield' },
   { key: 'proxmox', label: 'Proxmox', icon: 'server', pveOnly: true },
 ];
@@ -98,6 +101,7 @@ export function renderClient(root, { go, params }) {
     const a = agent();
     const items = [
       { k: 'rename', label: 'Umbenennen', icon: 'edit' },
+      { k: 'folder', label: a.folderId && folderById(a.folderId) ? `Ordner: ${folderPath(a.folderId)}` : 'In Ordner verschieben', icon: 'folder' },
       ...(a.info?.proxmox ? [] : [{ k: 'pve', label: a.pve ? 'Proxmox-Zuordnung ändern' : 'Proxmox-VM zuordnen', icon: 'server' }]),
       ...(a.pve && a.pve.hostOnline ? [
         { k: 'pve-reboot', label: 'Über Proxmox neu starten', icon: 'refresh' },
@@ -121,6 +125,7 @@ export function renderClient(root, { go, params }) {
       close();
       try {
         if (k === 'rename') return rename();
+        if (k === 'folder') return moveMenu(anchor, [a.id]);
         if (k === 'pve') return assignDialog(a);
         if (k === 'pve-reboot') return pvePower(guestOf(a), 'reboot');
         if (k === 'pve-stop') return pvePower(guestOf(a), 'stop');
@@ -153,7 +158,7 @@ export function renderClient(root, { go, params }) {
     cleanupTab?.();
     const body = $('[data-body]', root);
     body.innerHTML = '';
-    cleanupTab = { overview, terminal, processes, services, scripts, notes, audit, proxmox }[key](body) || null;
+    cleanupTab = { overview, terminal, processes, services, scripts, notes, audit, proxmox, files: (b) => renderFiles(b, id) }[key](body) || null;
   }
   $$('[data-tab]', root).forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
 

@@ -9,6 +9,7 @@ import { lineChart } from '../charts.js';
 import { addClientDialog } from './settings.js';
 import { runScriptDialog } from './scripts.js';
 import { openConsole } from '../proxmox.js';
+import { renderFolderTree, subtreeIds, folderById, folderPath, moveMenu, folderIcon } from '../folders.js';
 
 const COLS = [
   { key: 'name', label: 'Name', get: (a) => a.name.toLowerCase() },
@@ -38,16 +39,19 @@ export function renderClients(root, { go }) {
   let state = 'all';
   let type = 'all';
   let current = null; // im Panel gezeigter Client
+  let folder = LS.get('clients.folder', 'all'); // 'all' | 'none' | Ordner-ID
   const selected = new Set();
 
   root.innerHTML = `
     <div class="cl-layout">
+      <aside class="ft" data-tree></aside>
       <div class="cl-list">
         <div class="page-head">
           <h1>Clients</h1><span class="sub" data-count></span>
           <span class="spacer"></span>
           <div class="btn-group" data-bulk style="display:none">
             <span class="muted" data-selcount style="align-self:center;font-size:12.5px"></span>
+            <button class="btn" data-move>${icon('folder', 'sm')}Verschieben</button>
             <button class="btn" data-run>${icon('code', 'sm')}Skript ausführen</button>
             <button class="btn" data-reboot>${icon('refresh', 'sm')}Neustart</button>
           </div>
@@ -69,6 +73,16 @@ export function renderClients(root, { go }) {
   $('[data-q]', root).addEventListener('input', (e) => { query = e.target.value.toLowerCase(); draw(); });
   $('[data-tag]', root).addEventListener('change', (e) => { tagFilter = e.target.value; draw(); });
   $('[data-run]', root).onclick = () => runScriptDialog({ preselect: [...selected] });
+  $('[data-move]', root).onclick = (e) => moveMenu(e.currentTarget, [...selected]);
+  const tree = renderFolderTree($('[data-tree]', root), {
+    selected: folder,
+    onSelect: (k) => { folder = k; LS.set('clients.folder', k); draw(); },
+  });
+  const inFolder = (a) => {
+    if (folder === 'all') return true;
+    if (folder === 'none') return !a.folderId || !folderById(a.folderId);
+    return !!a.folderId && subtreeIds(folder).has(a.folderId);
+  };
   $('[data-reboot]', root).onclick = async () => {
     const ids = [...selected].filter((id) => api.agents.get(id)?.online);
     if (!ids.length) return toast('Keiner der ausgewählten Clients ist online', 'err');
@@ -93,13 +107,13 @@ export function renderClients(root, { go }) {
 
     const col = COLS.find((c) => c.key === sort.key) || COLS[0];
     const rows = all
-      .filter((a) => matchState(a, state) && matchType(a, type))
+      .filter((a) => inFolder(a) && matchState(a, state) && matchType(a, type))
       .filter((a) => !tagFilter || a.tags?.includes(tagFilter))
       .filter((a) => !query || [a.name, a.hostname, primaryIp(a), a.os, a.publicIp, isPveHost(a) ? 'proxmox' : '', a.pve?.hostName, ...(a.tags || [])].join(' ').toLowerCase().includes(query))
       .sort((a, b) => { const x = col.get(a), y = col.get(b); return (x > y ? 1 : x < y ? -1 : 0) * sort.dir; });
     for (const id of selected) if (!api.agents.has(id)) selected.delete(id);
 
-    $('[data-count]', root).textContent = `${rows.length} von ${all.length}`;
+    $('[data-count]', root).textContent = `${folder !== 'all' && folder !== 'none' && folderById(folder) ? `${folderPath(folder)} · ` : folder === 'none' ? 'Ohne Ordner · ' : ''}${rows.length} von ${all.length}`;
     $('[data-bulk]', root).style.display = selected.size ? 'flex' : 'none';
     $('[data-selcount]', root).textContent = `${selected.size} ausgewählt`;
 
@@ -109,7 +123,7 @@ export function renderClients(root, { go }) {
     $('tbody', root).innerHTML = rows.length ? rows.map((a) => {
       const m = a.metrics;
       const [cls, label] = stateOf(a);
-      return `<tr class="click ${a.online ? '' : 'off'} ${current === a.id ? 'sel' : ''}" data-id="${a.id}">
+      return `<tr class="click ${a.online ? '' : 'off'} ${current === a.id ? 'sel' : ''}" data-id="${a.id}" draggable="true">
         <td><input type="checkbox" class="check" data-sel ${selected.has(a.id) ? 'checked' : ''}></td>
         <td><div class="nmc"><span class="nm-ic">${clientIcon(a)}</span><div class="nm-t"><div class="n">${esc(a.name)}</div>${a.pve ? `<div class="s">${pveLine(a)}</div>` : ''}</div></div></td>
         <td><span class="state"><span class="dot ${cls}"></span>${label}</span></td>
@@ -189,14 +203,16 @@ export function renderClients(root, { go }) {
         ['Arbeitsspeicher', `${bar(memPct(m), t.mem)}${m?.mem ? `<div class="muted" style="font-size:11.5px;margin-top:2px">${fmtBytes(m.mem.used)} von ${fmtBytes(m.mem.total)}</div>` : ''}`],
         ...(disk ? [[`Datenträger ${esc(disk.mount)}`, bar(disk.pct, t.disk)]] : []),
       ] : []),
+      ['Ordner', `<button class="linkbtn" data-act="move">${folderIcon(folderById(a.folderId))}${a.folderId && folderById(a.folderId) ? esc(folderPath(a.folderId)) : 'ohne Ordner'}</button>`],
       ['Tags', (a.tags || []).map((x) => tagHtml(x, { small: true })).join(' ') || '<span class="muted">–</span>'],
       ['Agent', `${esc(a.version || '–')}${a.outdated ? ' <span class="badge warning">veraltet</span>' : ''}`],
     ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('');
   }
-  async function panelAction(kind) {
+  async function panelAction(kind, btn) {
     const a = api.agents.get(current);
     if (!a) return;
     try {
+      if (kind === 'move') return moveMenu(btn, [a.id]);
       if (kind === 'terminal') return go(`#/client/${a.id}/terminal`);
       if (kind === 'console') return openConsole({ hostId: a.pve.hostId, vmid: a.pve.vmid, type: a.pve.type, name: a.name, label: a.name, hostName: a.pve.hostName });
       if (kind === 'wake') {
@@ -217,7 +233,7 @@ export function renderClients(root, { go }) {
     const ty = e.target.closest('[data-t]');
     if (ty) { type = ty.dataset.t; return draw(); }
     const act = e.target.closest('[data-act]');
-    if (act) return panelAction(act.dataset.act);
+    if (act) return panelAction(act.dataset.act, act);
     const th = e.target.closest('[data-sort]');
     if (th) {
       sort = { key: th.dataset.sort, dir: sort.key === th.dataset.sort ? -sort.dir : 1 };
@@ -240,6 +256,19 @@ export function renderClients(root, { go }) {
     if (current === tr.dataset.id) return closePanel();
     openPanel(tr.dataset.id);
   });
+  view.addEventListener('dragstart', (e) => {
+    const tr = e.target.closest('tr[data-id]');
+    if (!tr) return;
+    const ids = selected.has(tr.dataset.id) ? [...selected] : [tr.dataset.id];
+    e.dataTransfer.setData('text/x-bolzo-agents', JSON.stringify(ids));
+    e.dataTransfer.effectAllowed = 'move';
+    const ghost = document.createElement('div');
+    ghost.className = 'drag-ghost';
+    ghost.textContent = ids.length === 1 ? api.agents.get(ids[0])?.name : `${ids.length} Clients`;
+    document.body.append(ghost);
+    e.dataTransfer.setDragImage(ghost, 10, 10);
+    setTimeout(() => ghost.remove());
+  });
   view.addEventListener('dblclick', (e) => {
     const tr = e.target.closest('tr[data-id]');
     if (tr) go(`#/client/${tr.dataset.id}`);
@@ -247,5 +276,6 @@ export function renderClients(root, { go }) {
 
   draw();
   const off = api.on('agents', throttle(draw, 1500));
-  return () => { off(); clearInterval(histTimer); chart?.destroy?.(); };
+  const offF = api.on('folders', throttle(draw, 300));
+  return () => { off(); offF(); tree.destroy(); clearInterval(histTimer); chart?.destroy?.(); };
 }

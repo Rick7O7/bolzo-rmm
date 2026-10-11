@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -975,6 +975,151 @@ async function vncOpen(p) {
 }
 
 // ---------------------------------------------------------------------------
+// Dateimanager: auflisten, Ordner anlegen, umbenennen, löschen, hoch-/herunterladen
+// ---------------------------------------------------------------------------
+const MAX_ENTRIES = 5000;
+
+function absPath(p) {
+  const s = String(p || '');
+  if (!s) throw new Error('Pfad fehlt');
+  return path.resolve(s);
+}
+// Schutz vor Versehen: Laufwerks-/Dateisystem-Wurzel nie löschen oder umbenennen
+const isRoot = (p) => path.parse(p).root === p;
+
+async function fsList({ path: p }) {
+  if (!p && IS_WIN) {
+    const drives = [];
+    for (const l of 'CDEFGHIJKLMNOPQRSTUVWXYZ') {
+      try { await fs.promises.access(`${l}:\\`); drives.push({ name: `${l}:`, path: `${l}:\\`, type: 'drive' }); } catch {}
+    }
+    return { path: '', parent: null, sep: '\\', entries: drives };
+  }
+  const dir = p ? absPath(p) : '/';
+  const dirents = await fs.promises.readdir(dir, { withFileTypes: true });
+  const entries = [];
+  await Promise.all(dirents.slice(0, MAX_ENTRIES).map(async (d) => {
+    const full = path.join(dir, d.name);
+    let st = null;
+    try { st = await fs.promises.stat(full); } catch {}
+    const type = st?.isDirectory() ? 'dir' : st?.isFile() ? 'file' : d.isSymbolicLink() ? 'link' : 'other';
+    entries.push({ name: d.name, path: full, type, size: st?.size ?? null, mtime: st?.mtimeMs ?? null, link: d.isSymbolicLink() });
+  }));
+  entries.sort((a, b) => (b.type === 'dir') - (a.type === 'dir') || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  const parent = isRoot(dir) ? (IS_WIN ? '' : null) : path.dirname(dir);
+  return { path: dir, parent, sep: path.sep, entries, truncated: dirents.length > MAX_ENTRIES };
+}
+
+async function fsMkdir({ path: p }) {
+  await fs.promises.mkdir(absPath(p), { recursive: true });
+  return { ok: true };
+}
+
+async function fsRename({ from, name }) {
+  const src = absPath(from);
+  const n = String(name || '');
+  if (!n || /[\\/]/.test(n) || n === '.' || n === '..') throw new Error('Ungültiger Name');
+  if (isRoot(src)) throw new Error('Die Wurzel kann nicht umbenannt werden');
+  const dst = path.join(path.dirname(src), n);
+  if (fs.existsSync(dst)) throw new Error(`„${n}“ gibt es dort bereits`);
+  await fs.promises.rename(src, dst);
+  return { ok: true, path: dst };
+}
+
+async function fsDelete({ paths }) {
+  const list = (Array.isArray(paths) ? paths : []).map(absPath);
+  if (!list.length) throw new Error('Nichts ausgewählt');
+  if (list.some(isRoot)) throw new Error('Die Wurzel eines Laufwerks kann nicht gelöscht werden');
+  for (const p of list) await fs.promises.rm(p, { recursive: true, force: true });
+  return { ok: true, deleted: list.length };
+}
+
+// Eigener WebSocket zum Server für eine Übertragung (Anmeldung wie beim VNC-Tunnel)
+function openStreamTunnel(sid) {
+  return new Promise((resolve, reject) => {
+    const tun = new WebSocket(cfg.server.replace(/^http/, 'ws') + '/ws/tunnel');
+    tun.binaryType = 'arraybuffer';
+    const t = setTimeout(() => { reject(new Error('Zeitüberschreitung beim Tunnelaufbau')); try { tun.close(); } catch {} }, 15000);
+    tun.onopen = () => {
+      clearTimeout(t);
+      tun.send(JSON.stringify({ type: 'hello', id: cfg.id, secret: cfg.secret, sid }));
+      resolve(tun);
+    };
+    tun.onerror = () => { clearTimeout(t); reject(new Error('Tunnel zum Server fehlgeschlagen')); };
+  });
+}
+
+// Herunterladen: Server schickt "go", sobald die HTTP-Antwort bereit ist, und bestätigt
+// laufend, wie viel er weitergegeben hat – so bleiben höchstens 4 MB unterwegs.
+async function fsDownload({ sid, path: p }) {
+  const file = absPath(p);
+  const st = await fs.promises.stat(file);
+  if (!st.isFile()) throw new Error('Nur Dateien können heruntergeladen werden');
+  const tun = await openStreamTunnel(String(sid));
+  let acked = 0;
+  let wake = null;
+  let started = null;
+  const go = new Promise((r) => (started = r));
+  tun.onmessage = (e) => {
+    if (typeof e.data !== 'string') return;
+    if (e.data === 'go') return started();
+    try { const m = JSON.parse(e.data); if (m.ack) { acked = m.ack; wake?.(); } } catch {}
+  };
+  tun.onclose = () => { started(); wake?.(); };
+  (async () => {
+    await go;
+    let sent = 0;
+    try {
+      for await (const chunk of fs.createReadStream(file, { highWaterMark: 256 * 1024 })) {
+        if (tun.readyState !== 1) return;
+        tun.send(chunk);
+        sent += chunk.length;
+        while (sent - acked > 4 * 1024 * 1024 && tun.readyState === 1) await new Promise((r) => { wake = r; setTimeout(r, 5000); });
+      }
+      if (tun.readyState === 1) tun.send(JSON.stringify({ eof: true }));
+    } catch (e) {
+      if (tun.readyState === 1) tun.send(JSON.stringify({ error: e.message }));
+    }
+  })();
+  return { size: st.size, name: path.basename(file) };
+}
+
+// Hochladen: erst in "<name>.bolzo-teil" schreiben, nach "EOF" umbenennen
+async function fsUpload({ sid, dir, name }) {
+  const n = String(name || '');
+  if (!n || /[\\/]/.test(n) || n === '.' || n === '..') throw new Error('Ungültiger Dateiname');
+  const target = path.join(absPath(dir), n);
+  const part = `${target}.bolzo-teil`;
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  const out = fs.createWriteStream(part);
+  const tun = await openStreamTunnel(String(sid));
+  let written = 0;
+  let done = false;
+  tun.onmessage = async (e) => {
+    if (typeof e.data !== 'string') {
+      const buf = Buffer.from(e.data);
+      written += buf.length;
+      out.write(buf);
+      return;
+    }
+    if (e.data !== 'EOF') return;
+    done = true;
+    out.end(async () => {
+      try {
+        await fs.promises.rm(target, { force: true });
+        await fs.promises.rename(part, target);
+        tun.send(JSON.stringify({ ok: true, size: written, path: target }));
+      } catch (err) {
+        tun.send(JSON.stringify({ error: err.message }));
+      }
+      setTimeout(() => { try { tun.close(); } catch {} }, 500);
+    });
+  };
+  tun.onclose = () => { if (!done) { out.destroy(); fs.promises.rm(part, { force: true }).catch(() => {}); } };
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // Energie, Wake-on-LAN, Update, Deinstallation
 // ---------------------------------------------------------------------------
 function power(kind) {
@@ -1102,6 +1247,12 @@ const actions = {
   'pve.guests': pveGuests,
   'pve.power': pvePower,
   'pve.restartAgent': pveRestartAgent,
+  'fs.list': fsList,
+  'fs.mkdir': fsMkdir,
+  'fs.rename': fsRename,
+  'fs.delete': fsDelete,
+  'fs.download': fsDownload,
+  'fs.upload': fsUpload,
   'pve.config.get': pveConfigGet,
   'pve.config.set': pveConfigSet,
   'pve.snap.list': pveSnapList,
