@@ -217,7 +217,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .detail-title { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .detail-title h1 { margin: 0; font-size: 20px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
 .detail-title .meta { display: flex; gap: 14px; color: var(--muted); font-size: 12.5px; flex-wrap: wrap; align-items: center; }
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 18px; overflow-x: auto; scrollbar-width: thin; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 18px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
 .tab { flex: none; }
 .tab { border: 0; background: none; color: var(--text-2); padding: 10px 14px; cursor: pointer; display: inline-flex; gap: 8px; align-items: center; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tab:hover { color: var(--text); }
@@ -760,3 +760,24 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .px-acts .btn { width: 30px; height: 30px; }
 .px-fix { width: 24px; height: 24px; color: var(--warning); vertical-align: middle; }
 @media (hover: none) { .px-acts > div { opacity: 1; } }
+/* API-Zugänge: Rechte-Auswahl */
+.tk-scopes { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+.tk-scope { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
+.tk-scope:hover { border-color: var(--border-strong); }
+.tk-scope:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: var(--accent-soft); }
+.tk-scope input { margin-top: 2px; flex: none; }
+.tk-scope b { display: block; font-weight: 550; font-size: 13px; }
+.tk-scope small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 1px; line-height: 1.35; }
+/* Seitenart: BOLZO-Client (blau) oder Proxmox-Gast (orange) – mit Wechsel zur jeweils anderen Seite */
+:root { --pve: #f39c4a; }
+.page-kind { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 650; letter-spacing: 0.7px; text-transform: uppercase; margin-bottom: 2px; flex-wrap: wrap; }
+.page-kind .icon { width: 13px; height: 13px; }
+.page-kind > span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 2px; }
+.page-kind.client { color: var(--accent); }
+.page-kind.pve { color: var(--pve); }
+.kind-switch { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; font-weight: 500; letter-spacing: 0; text-transform: none; text-decoration: none; border: 1px solid var(--border-strong); color: var(--text-2); background: var(--surface-2); }
+.kind-switch:hover { color: var(--text); border-color: currentColor; }
+.kind-switch.pve:hover { color: var(--pve); }
+.kind-switch.client:hover { color: var(--accent); }
+.detail-icon.client { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 9%, var(--surface-2)); }
+.detail-icon.pve { color: var(--pve); border-color: color-mix(in srgb, var(--pve) 45%, transparent); background: color-mix(in srgb, var(--pve) 10%, var(--surface-2)); }

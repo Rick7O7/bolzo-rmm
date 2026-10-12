@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.5.2';
+const VERSION = '1.6.0';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -470,8 +470,9 @@ function decodeDesc(raw) {
 }
 
 // Gast-Konfiguration lesen (nur der aktuelle Stand, ohne Snapshot-Abschnitte); MACs für die automatische Zuordnung
+const guestConfText = (type, vmid) => readFile(`/etc/pve/nodes/${pveNode()}/${PVE_TYPES[type]}/${vmid}.conf`).split(/^\[/m)[0];
 function guestConf(type, vmid) {
-  const text = readFile(`/etc/pve/nodes/${pveNode()}/${PVE_TYPES[type]}/${vmid}.conf`).split(/^\[/m)[0];
+  const text = guestConfText(type, vmid);
   const get = (key) => (text.match(new RegExp(`^${key}:\\s*(.+)$`, 'm')) || [])[1]?.trim() || '';
   const nets = [...text.matchAll(/^net\d+:\s*(.+)$/gm)].map((m) => m[1]);
   return {
@@ -567,6 +568,22 @@ async function pveRestartAgent(p) {
     throw new Error(type === 'qemu' && /agent/i.test(msg) ? 'Kein QEMU-Gast-Agent in der VM – Agent bitte dort selbst neu starten' : msg);
   }
   return { ok: true };
+}
+
+// VM/Container endgültig löschen – nur ausgeschaltet; samt Disks, Backup-Jobs und Replikation.
+// Der Proxmox-Schutz ("protection") verhindert das Löschen weiterhin (pvesh meldet dann einen Fehler).
+async function pveDestroy(p) {
+  const { vmid, type } = checkGuest(p);
+  if (!IS_PVE) throw new Error('Kein Proxmox-Host');
+  if (TEST_PVE) return { ok: true, test: true };
+  const node = pveNode();
+  const st = await pvesh('get', `/nodes/${node}/${type}/${vmid}/status/current`);
+  if (st?.status === 'running') throw new Error('Läuft noch – bitte zuerst herunterfahren');
+  if (String(st?.protection) === '1' || guestConfText(type, vmid).match(/^protection:\s*1/m)) {
+    throw new Error('Schutz vor Löschen ist aktiv – erst in den Optionen ausschalten');
+  }
+  const r = await pveRun(['delete', `/nodes/${node}/${type}/${vmid}`, '--purge', '1', '--destroy-unreferenced-disks', '1'], 20000);
+  return { ok: true, pending: !r.done };
 }
 
 // Starten/Herunterfahren können lange dauern: kurz auf Fehler warten, dann im Hintergrund weiterlaufen lassen
@@ -1305,6 +1322,7 @@ const actions = {
   'pve.guests': pveGuestsCached,
   'pve.power': pveFresh(pvePower),
   'pve.restartAgent': pveRestartAgent,
+  'pve.destroy': pveFresh(pveDestroy),
   'fs.list': fsList,
   'fs.mkdir': fsMkdir,
   'fs.rename': fsRename,

@@ -48,8 +48,10 @@ export function renderClient(root, { go, params }) {
     if (!a) return;
     const head = $('[data-head]', root);
     head.innerHTML = `
-      <div class="detail-icon">${clientIcon(a)}</div>
+      <div class="detail-icon client">${clientIcon(a)}</div>
       <div class="detail-title grow">
+        <div class="page-kind client">${icon('monitor', 'sm')}BOLZO-Client<span>Agent im Betriebssystem</span>
+          ${a.pve ? `<a href="#/guest/${a.pve.hostId}/${a.pve.type}/${a.pve.vmid}" class="kind-switch pve" title="Proxmox-Seite: Hardware, Netzwerk, Snapshots, Backups">${icon('server', 'sm')}Proxmox-${a.pve.type === 'lxc' ? 'Container' : 'VM'} öffnen</a>` : ''}</div>
         <h1>${esc(a.name)} <button class="btn ghost sm icon-only" title="Umbenennen" data-rename>${icon('edit', 'sm')}</button></h1>
         <div class="meta">${statusHtml(a)}<span title="${esc(a.os || '')}">${esc(osName(a))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}${pveBadge(a)}</div>
         ${a.tags?.length ? `<div class="tag-row" style="margin-top:6px">${a.tags.map((t) => tagHtml(t)).join('')}</div>` : ''}

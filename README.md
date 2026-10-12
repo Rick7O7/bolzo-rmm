@@ -154,13 +154,17 @@ unverändert an die App reicht (`/ws/console`). Am Proxmox muss dafür nichts ei
 Eine ungenutzte Festnetznummer der FRITZ!Box anrufen, PIN eintippen und z.B. „Fahr SRV-MC herunter"
 sagen. Ein kleiner Dienst auf einem Gerät **im FRITZ!Box-Netz** (Raspberry Pi 5 oder Mini-PC; ein Pi 4 geht,
 braucht aber spürbar länger für die Antwort) meldet sich als IP-Telefon an, erkennt die Sprache lokal (Whisper), lässt Claude den
-Befehl verstehen und führt ihn über einen eingeschränkten API-Zugang aus. Jede Aktion wird vorher per
-Taste 1 bestätigt. Am Telefon gehen nur Status, Neustart, Herunterfahren und Aufwecken.
+Befehl verstehen und führt ihn über einen eingeschränkten API-Zugang aus. Jede Aktion wird vorher
+rückgefragt („Ja" sagen oder Taste 1). Was am Telefon geht, bestimmen die Rechte des API-Zugangs (in der App
+jederzeit änderbar, der Schlüssel bleibt gleich): Status, Neustart/Herunterfahren/Aufwecken, Prozesse beenden,
+Dienste steuern, Proxmox-VMs starten/stoppen, gespeicherte Skripte ausführen und – nur wenn angehakt –
+ausgeschaltete VMs löschen (dafür zusätzlich die VM-Nummer auf der Tastatur eintippen). Terminal und frei
+diktierte Befehle gibt es am Telefon nie.
 
 1. **FRITZ!Box:** Telefonie → Telefoniegeräte → Neues Gerät → Telefon → „LAN/WLAN (IP-Telefon)";
    Benutzername + Kennwort vergeben; ausgehend und ankommend **nur** die ungenutzte Nummer.
    Bei allen anderen Telefonen diese Nummer abwählen. „Anmeldung aus dem Internet" bleibt aus.
-2. **App:** Einstellungen → API-Zugänge → Zugang „Telefon" mit beiden Rechten anlegen, Schlüssel kopieren.
+2. **App:** Einstellungen → API-Zugänge → Zugang „Telefon" mit den gewünschten Rechten anlegen, Schlüssel kopieren.
 3. **Gerät zu Hause:**
 
    ```bash

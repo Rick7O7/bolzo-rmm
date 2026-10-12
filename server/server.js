@@ -164,9 +164,16 @@ function validSession(token) {
 }
 
 // API-Zugänge (z.B. für die Sprachsteuerung) dürfen nur, was ihre Rechte (scopes) erlauben:
-//   status – Clients und ihren Zustand lesen
-//   power  – Neustart, Herunterfahren, Aufwecken
-const TOKEN_SCOPES = ['status', 'power'];
+//   status    – Clients und ihren Zustand lesen
+//   power     – Neustart, Herunterfahren, Aufwecken
+//   processes – Prozesse anzeigen und beenden
+//   services  – Dienste anzeigen, starten, stoppen, neu starten
+//   proxmox   – VMs/Container eines Proxmox-Hosts anzeigen, starten, herunterfahren, neu starten
+//   scripts   – gespeicherte Skripte aus der Bibliothek ausführen (keine frei eingegebenen Befehle)
+//   pvedelete – VMs/Container endgültig löschen (nur ausgeschaltet, Proxmox-Schutz wird beachtet)
+const TOKEN_SCOPES = ['status', 'power', 'processes', 'services', 'proxmox', 'scripts', 'pvedelete'];
+// Welches Recht eine Client-Aktion braucht (nicht aufgeführt = nur mit Admin-Anmeldung)
+const ACTION_SCOPES = { reboot: 'power', shutdown: 'power', processes: 'processes', kill: 'processes', services: 'services', service: 'services' };
 
 function apiTokenFor(token) {
   if (!token || !token.startsWith('bzr_')) return null;
@@ -195,13 +202,15 @@ function requireAdmin(req, res, next) {
   res.status(401).json({ error: 'Nicht angemeldet' });
 }
 
+// scope: Name des Rechts, Liste (eines davon genügt) oder Funktion (req) => Name (z.B. abhängig von der Aktion)
 function requireScope(scope) {
   return (req, res, next) => {
     const token = bearer(req);
     if ((req.session = noteDevice(validSession(token), req.get('x-bolzo-device')))) return next();
     const t = apiTokenFor(token);
     if (!t) return res.status(401).json({ error: 'Nicht angemeldet' });
-    if (!t.scopes.includes(scope)) return res.status(403).json({ error: 'Dieser API-Zugang hat dafür keine Berechtigung' });
+    const need = [typeof scope === 'function' ? scope(req) : scope].flat().filter(Boolean);
+    if (!need.some((s) => t.scopes.includes(s))) return res.status(403).json({ error: 'Dieser API-Zugang hat dafür keine Berechtigung' });
     req.apiToken = t;
     if (Date.now() - (t.lastUsed || 0) > 60e3) {
       t.lastUsed = Date.now();
@@ -366,11 +375,10 @@ function auditedAction(action, params) {
     default: return null;
   }
 }
-app.post('/api/agents/:id/action', requireScope('power'), wrap(async (req, res) => {
+app.post('/api/agents/:id/action', requireScope((req) => ACTION_SCOPES[req.body?.action]), wrap(async (req, res) => {
   const a = getAgent(req);
   const { action, params } = req.body || {};
   if (!ACTIONS.has(action)) throw httpError(400, 'Unbekannte Aktion');
-  if (req.apiToken && !POWER_LABELS[action]) throw httpError(403, 'Dieser API-Zugang darf nur neu starten und herunterfahren');
   log(`[action] ${action} -> ${a.info?.hostname || a.id}`);
   const what = auditedAction(action, params || {});
   let result;
@@ -464,7 +472,7 @@ function guestParams(body) {
   return { vmid, type: body.type, name: String(body?.name || '').slice(0, 80) };
 }
 
-app.get('/api/agents/:id/pve/guests', requireAdmin, wrap(async (req, res) => {
+app.get('/api/agents/:id/pve/guests', requireScope(['proxmox', 'pvedelete']), wrap(async (req, res) => {
   const h = pveHost(req);
   const r = await agentRequest(h.id, 'pve.guests', {}, 60000);
   const assigned = {};
@@ -472,7 +480,7 @@ app.get('/api/agents/:id/pve/guests', requireAdmin, wrap(async (req, res) => {
   res.json({ ...r, guests: r.guests.map((g) => ({ ...g, agentId: assigned[`${g.type}:${g.vmid}`] || null })) });
 }));
 
-app.post('/api/agents/:id/pve/power', requireAdmin, wrap(async (req, res) => {
+app.post('/api/agents/:id/pve/power', requireScope('proxmox'), wrap(async (req, res) => {
   const h = pveHost(req);
   const { vmid, type, name } = guestParams(req.body);
   const op = req.body?.op;
@@ -490,6 +498,30 @@ app.post('/api/agents/:id/pve/power', requireAdmin, wrap(async (req, res) => {
 
 // Verwaltung: Gast-Einstellungen, Snapshots, Backups, Host (Speicher, Updates, Aufgaben, Netzwerk).
 // Nur diese Agent-Aktionen sind erlaubt; verändernde landen im Protokoll.
+// VM/Container endgültig löschen (samt Disks). Der Agent lehnt laufende oder geschützte Gäste ab.
+app.post('/api/agents/:id/pve/destroy', requireScope('pvedelete'), wrap(async (req, res) => {
+  const h = pveHost(req);
+  const { vmid, type, name } = guestParams(req.body);
+  const what = guestAudit(h, vmid, type, name);
+  const label = `Proxmox: ${guestKind(type)} gelöscht`;
+  try {
+    const r = await agentRequest(h.id, 'pve.destroy', { vmid, type }, 40000);
+    // Zuordnung von Clients zu diesem Gast aufheben
+    for (const a of Object.values(store.data.agents)) {
+      if (a.pve?.hostId === h.id && a.pve.vmid === vmid && a.pve.type === type) {
+        delete a.pve;
+        broadcastAgent(a.id);
+      }
+    }
+    store.save();
+    auditReq(req, 'action', label, { ...what, detail: [what.detail, name].filter(Boolean).join(' – ') });
+    res.json(r ?? { ok: true });
+  } catch (e) {
+    auditReq(req, 'action', label, { ...what, ok: false, result: e.message });
+    throw e;
+  }
+}));
+
 const PVE_CALLS = {
   'pve.config.get': { guest: true },
   'pve.config.set': { guest: true, audit: 'Proxmox: Einstellungen geändert', detail: (p) => Object.keys(p.changes || {}).join(', ') },
@@ -811,7 +843,10 @@ function validateScript(body) {
   return s;
 }
 
-app.get('/api/scripts', requireAdmin, (req, res) => res.json(store.data.scripts));
+// API-Zugänge sehen nur Name und Beschreibung, nicht den Inhalt
+app.get('/api/scripts', requireScope('scripts'), (req, res) => res.json(req.apiToken
+  ? store.data.scripts.map((s) => ({ id: s.id, name: s.name, description: s.description || '', shell: s.shell }))
+  : store.data.scripts));
 
 app.post('/api/scripts', requireAdmin, wrap(async (req, res) => {
   const s = { id: crypto.randomUUID(), ...validateScript(req.body || {}), createdAt: Date.now() };
@@ -880,7 +915,7 @@ app.post('/api/agents/:id/run', requireAdmin, wrap(async (req, res) => {
 }));
 
 // Bibliotheks-Skript auf mehreren Clients parallel
-app.post('/api/scripts/:sid/run', requireAdmin, wrap(async (req, res) => {
+app.post('/api/scripts/:sid/run', requireScope('scripts'), wrap(async (req, res) => {
   const s = store.data.scripts.find((x) => x.id === req.params.sid);
   if (!s) throw httpError(404, 'Skript nicht gefunden');
   const ids = Array.isArray(req.body?.agentIds) ? req.body.agentIds : [];
@@ -1083,6 +1118,13 @@ const publicToken = (t) => ({ id: t.id, name: t.name, scopes: t.scopes, createdA
 
 app.get('/api/tokens', requireAdmin, (req, res) => res.json(store.data.apiTokens.map(publicToken)));
 
+// Ein API-Zugang fragt seine eigenen Rechte ab (z.B. die Sprachsteuerung beim Start)
+app.get('/api/token-info', (req, res) => {
+  const t = apiTokenFor(bearer(req));
+  if (!t) return res.status(401).json({ error: 'Kein gültiger API-Zugang' });
+  res.json({ name: t.name, scopes: t.scopes });
+});
+
 app.post('/api/tokens', requireAdmin, wrap(async (req, res) => {
   const name = String(req.body?.name || '').trim().slice(0, 60);
   const scopes = [...new Set((req.body?.scopes || []).filter((s) => TOKEN_SCOPES.includes(s)))];
@@ -1095,6 +1137,20 @@ app.post('/api/tokens', requireAdmin, wrap(async (req, res) => {
   log(`[api] Zugang angelegt: ${name} (${scopes.join(', ')})`);
   auditReq(req, 'settings', 'API-Zugang angelegt', { target: name, detail: `Rechte: ${scopes.join(', ')}` });
   res.json({ ...publicToken(t), token }); // Klartext nur dieses eine Mal
+}));
+
+// Rechte eines bestehenden Zugangs ändern (der Schlüssel bleibt gleich)
+app.patch('/api/tokens/:tid', requireAdmin, wrap(async (req, res) => {
+  const t = store.data.apiTokens.find((x) => x.id === req.params.tid);
+  if (!t) throw httpError(404, 'API-Zugang nicht gefunden');
+  const scopes = [...new Set((req.body?.scopes || []).filter((s) => TOKEN_SCOPES.includes(s)))];
+  if (!scopes.length) throw httpError(400, 'Mindestens ein Recht auswählen');
+  const before = t.scopes.join(', ');
+  t.scopes = scopes;
+  store.save();
+  log(`[api] Rechte geändert: ${t.name} (${scopes.join(', ')})`);
+  auditReq(req, 'settings', 'API-Zugang geändert', { target: t.name, detail: `Rechte: ${before} → ${scopes.join(', ')}` });
+  res.json(publicToken(t));
 }));
 
 app.delete('/api/tokens/:tid', requireAdmin, (req, res) => {

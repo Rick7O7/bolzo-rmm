@@ -55,6 +55,34 @@ export async function pvePower({ hostId, vmid, type, name }, op) {
 }
 
 // In der Desktop-App öffnet jede Konsole ein eigenes Fenster (console.html), sonst als Überlagerung
+// VM/Container endgültig löschen: nur ausgeschaltet, Bestätigung durch Eintippen des Namens
+export function destroyGuest(g, onDone) {
+  const word = g.name || String(g.vmid);
+  if (g.status === 'running') return toast(`${word} läuft noch – bitte zuerst herunterfahren`, 'err');
+  const m = modal({
+    title: `${kind(g.type)} ${g.vmid} löschen?`,
+    body: `<p style="margin:0 0 10px;color:var(--text-2)"><b>${esc(word)}</b> wird auf ${esc(g.hostName || 'dem Proxmox-Server')} <b>endgültig gelöscht</b> – samt allen Disks, Snapshots und Backup-Jobs. Backups auf anderen Speichern bleiben erhalten. Das lässt sich nicht rückgängig machen.</p>
+      <div class="field"><label>Zum Bestätigen den Namen eintippen: <span class="mono">${esc(word)}</span></label><input class="input" data-confirm autocomplete="off"></div>`,
+    foot: `<button class="btn" data-close>Abbrechen</button><button class="btn danger" data-go disabled>${icon('trash', 'sm')}Endgültig löschen</button>`,
+  });
+  const inp = $('[data-confirm]', m.el);
+  const go = $('[data-go]', m.el);
+  inp.oninput = () => (go.disabled = inp.value.trim() !== word);
+  inp.focus();
+  go.onclick = async () => {
+    go.disabled = true;
+    try {
+      await api.post(`/api/agents/${g.hostId}/pve/destroy`, { vmid: g.vmid, type: g.type, name: g.name });
+      m.close();
+      toast(`${word} wird gelöscht`);
+      onDone?.();
+    } catch (e) {
+      toast(e.message, 'err');
+      go.disabled = false;
+    }
+  };
+}
+
 export function openConsole(g) {
   if (window.rmmDesk?.openConsole) {
     const { hostId, vmid, type, name, label, hostName } = g;
@@ -546,10 +574,12 @@ export function renderProxmoxTab(body, hostId) {
       ...(g.status === 'running' ? [{ k: 'console', label: 'Konsole öffnen', icon: g.type === 'lxc' ? 'terminal' : 'monitor' }] : []),
       ...(g.status === 'running' && (g.type === 'lxc' || g.agentId) ? [{ k: 'restart-agent', label: 'BOLZO-Agent im Gast neu starten', icon: 'refresh' }] : []),
       { k: 'settings', label: 'Details & Einstellungen', icon: 'sliders' },
+      ...(g.status !== 'running' ? [{ k: 'destroy', label: `${kind(g.type)} löschen ...`, icon: 'trash', danger: true }] : []),
     ], async (o) => {
       if (o === 'console') return openConsole(g);
       if (o === 'restart-agent') return restartAgent(g);
       if (o === 'settings') return openGuest(g);
+      if (o === 'destroy') return destroyGuest(g, () => setTimeout(load, 2500));
       if (await pvePower(g, o)) setTimeout(load, 2500);
     });
   };

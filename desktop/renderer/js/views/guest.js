@@ -4,7 +4,7 @@
 import { api } from '../api.js';
 import { icon, esc, el, $, $$, toast, fmtBytes, fmtDuration, tagHtml, osShort } from '../ui.js';
 import { lineChart } from '../charts.js';
-import { pveCall, pvePower, openConsole, kind, OSTYPES, statusBadge, miniBar, renderGuestSnapshots, renderGuestBackups, fetchGuests, poll } from '../proxmox.js';
+import { pveCall, pvePower, openConsole, destroyGuest, kind, OSTYPES, statusBadge, miniBar, renderGuestSnapshots, renderGuestBackups, fetchGuests, poll } from '../proxmox.js';
 
 const TABS = [
   ['overview', 'Übersicht', 'activity'], ['network', 'Netzwerk', 'network'], ['hardware', 'Hardware', 'cpu'],
@@ -75,8 +75,10 @@ export function renderGuest(root, { go, params }) {
     const crumb = $('[data-crumb]');
     if (crumb) crumb.textContent = `Proxmox / ${host()?.name || ''} / ${s.name}`;
     $('[data-head]', root).innerHTML = `
-      <div class="detail-icon">${icon(isCt ? 'box' : 'monitor')}</div>
+      <div class="detail-icon pve">${icon(isCt ? 'box' : 'monitor')}</div>
       <div class="detail-title grow">
+        <div class="page-kind pve">${icon('server', 'sm')}Proxmox-${isCt ? 'Container' : 'VM'}<span>auf ${esc(host()?.name || '')}</span>
+          ${s.agentId && api.agents.get(s.agentId) ? `<a href="#/client/${s.agentId}" class="kind-switch client" title="Seite des BOLZO-Agents im Gast: Programme, Dienste, Dateien, Terminal">${icon('monitor', 'sm')}BOLZO-Client öffnen</a>` : ''}</div>
         <h1>${esc(s.name)} ${statusBadge(s.status)}</h1>
         <div class="meta"><span>${kind(type)} ${vmid}</span><span>${esc(host()?.name || '')}</span><span>${esc(OSTYPES[s.ostype] ?? s.ostype ?? '')}</span>${run ? `<span>seit ${fmtDuration(s.uptime)}</span>` : ''}${s.lock ? `<span class="badge warning">gesperrt: ${esc(s.lock)}</span>` : ''}</div>
       </div>
@@ -332,6 +334,7 @@ export function renderGuest(root, { go, params }) {
         ...(status.status === 'running' ? [['stop', 'Ausschalten (hart)', 'stop', true]] : []),
         ...(status.status === 'running' && (isCt || status.agentId) ? [['restart-agent', 'BOLZO-Agent im Gast neu starten', 'refresh']] : []),
         ...(status.agentId ? [['client', 'Zugeordneten Client öffnen', 'monitor']] : []),
+        ...(status.status !== 'running' ? [['destroy', `${kind(type)} löschen ...`, 'trash', true]] : []),
       ];
       if (!items.length) return;
       const m = el(`<div class="menu" style="top:${r.bottom + 6}px;right:${window.innerWidth - r.right}px">${items.map(([key, l, i, d]) => `<button class="menu-item ${d ? 'danger' : ''}" data-k="${key}">${icon(i, 'sm')}${l}</button>`).join('')}</div>`);
@@ -344,6 +347,7 @@ export function renderGuest(root, { go, params }) {
         if (!key) return;
         close();
         if (key === 'client') return go(`#/client/${status.agentId}`);
+        if (key === 'destroy') return destroyGuest({ ...g(), status: status.status }, () => go('#/proxmox'));
         if (key === 'restart-agent') {
           try { await api.post(`/api/agents/${hostId}/pve/restart-agent`, { vmid, type, name: status.name }); toast('BOLZO-Agent wird neu gestartet'); } catch (err) { toast(err.message, 'err'); }
           return;

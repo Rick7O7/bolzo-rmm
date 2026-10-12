@@ -268,13 +268,39 @@ class Rmm:
             raise RuntimeError(msg or f"HTTP {r.status_code}")
         return r.json()
 
+    def scopes(self):
+        """Rechte dieses API-Zugangs (ältere Server kennen die Abfrage nicht: dann Status + Neustart)."""
+        try:
+            return self._check(self.http.get("/api/token-info"))["scopes"]
+        except Exception as e:
+            log.warning("Rechte des API-Zugangs unbekannt (%s) – nehme Status und Neustart an", e)
+            return ["status", "power"]
+
     def clients(self):
         return self._check(self.http.get("/api/agents"))
+
+    def action(self, client_id, action, params=None):
+        return self._check(self.http.post(f"/api/agents/{client_id}/action", json={"action": action, "params": params or {}}, timeout=60))
 
     def power(self, client_id, action):
         if action == "wake":
             return self._check(self.http.post(f"/api/agents/{client_id}/wake"))
-        return self._check(self.http.post(f"/api/agents/{client_id}/action", json={"action": action}))
+        return self.action(client_id, action)
+
+    def guests(self, host_id):
+        return self._check(self.http.get(f"/api/agents/{host_id}/pve/guests", timeout=60))["guests"]
+
+    def guest_power(self, host_id, g, op):
+        return self._check(self.http.post(f"/api/agents/{host_id}/pve/power", json={"vmid": g["vmid"], "type": g["type"], "name": g.get("name"), "op": op}))
+
+    def guest_destroy(self, host_id, g):
+        return self._check(self.http.post(f"/api/agents/{host_id}/pve/destroy", json={"vmid": g["vmid"], "type": g["type"], "name": g.get("name")}, timeout=60))
+
+    def scripts(self):
+        return self._check(self.http.get("/api/scripts"))
+
+    def run_script(self, script_id, client_ids):
+        return self._check(self.http.post(f"/api/scripts/{script_id}/run", json={"agentIds": client_ids}, timeout=900))
 
 
 def client_summary(a):
@@ -289,6 +315,10 @@ def client_summary(a):
         "tags": a.get("tags") or [],
         "warnings": [al.get("label") for al in a.get("alerts") or [] if al.get("kind") != "offline"],
     }
+    if (a.get("info") or {}).get("proxmox"):
+        s["proxmox_host"] = True
+    if a.get("pve"):
+        s["is_guest_of"] = f"{'Container' if a['pve'].get('type') == 'lxc' else 'VM'} {a['pve'].get('vmid')} auf {a['pve'].get('hostName')}"
     if a.get("online") and m:
         s["cpu_percent"] = round(m.get("cpu") or 0)
         if mem.get("total"):
@@ -304,89 +334,293 @@ def client_summary(a):
 # ---------------------------------------------------------------------------
 # Claude: Sprachbefehl -> Aktion
 # ---------------------------------------------------------------------------
+# Was der Assistent je nach Recht des API-Zugangs kann (für den System-Prompt)
+ABILITIES = {
+    "status": "den Zustand der Rechner abfragen (online, CPU, RAM, Datenträger, Warnungen)",
+    "power": "Rechner neu starten, herunterfahren oder per Wake-on-LAN aufwecken",
+    "processes": "laufende Programme (Prozesse) eines Rechners anzeigen und beenden",
+    "services": "Dienste eines Rechners suchen, starten, stoppen und neu starten",
+    "proxmox": "VMs und Container auf den Proxmox-Servern anzeigen, starten, herunterfahren, neu starten und hart ausschalten",
+    "pvedelete": "ausgeschaltete VMs und Container endgültig löschen",
+    "scripts": "gespeicherte Skripte aus der Bibliothek auf Rechnern ausführen",
+}
+
 SYSTEM = """Du bist der Telefon-Assistent von BOLZO RMM, einer Fernwartung für Server und PCs.
 Der Anrufer hat sich bereits per PIN ausgewiesen. Seine Sätze kommen aus einer Spracherkennung und
-können Hörfehler enthalten – Rechnernamen werden oft verstümmelt (z.B. "SRV MC", "Server MC", "S R V M C"
-für SRV-MC). Löse Namen über list_clients auf; Spitznamen über Tags oder Hostnamen sind erlaubt.
+können Hörfehler enthalten – Namen werden oft verstümmelt (z.B. "SRV MC", "Server MC", "S R V M C"
+für SRV-MC, "Krom" für chrome). Löse Rechnernamen über list_clients auf; Spitznamen über Tags oder
+Hostnamen sind erlaubt. Proxmox-VMs heißen oft wie der Rechner darin.
 
-Du kannst nur: Status abfragen, Rechner neu starten, herunterfahren oder per Wake-on-LAN aufwecken.
-Skripte, Terminal und Einstellungen gibt es am Telefon nicht – sag das freundlich, wenn danach gefragt wird.
-Ist unklar, welcher Rechner gemeint ist, frag kurz nach statt zu raten. Für mehrere Rechner rufst du
-power_action je Rechner einmal auf. Der Anrufer bestätigt jede Aktion selbst per Tastendruck.
+Du kannst: {abilities}.
+Alles andere (Terminal, frei diktierte Befehle, Einstellungen) gibt es am Telefon nicht – sag das freundlich.
+Ist unklar, welcher Rechner, Prozess, Dienst oder welche VM gemeint ist, frag kurz nach statt zu raten.
+Jede verändernde Aktion wird vor der Ausführung automatisch beim Anrufer rückgefragt – frag also nicht
+zusätzlich selbst "Soll ich ...?", sondern ruf das Werkzeug direkt auf. Für mehrere Ziele rufst du das
+Werkzeug je Ziel einmal auf.
 
 Deine Antworten werden vorgelesen: höchstens zwei bis drei kurze Sätze, keine Listen, kein Markdown,
-keine Emojis, keine IDs. Zahlen rund und gesprochen ("85 Prozent"). Sprich Deutsch."""
+keine Emojis, keine IDs oder PIDs. Zahlen rund und gesprochen ("85 Prozent"). Bei vielen Treffern nur die
+wichtigsten nennen. Sprich Deutsch."""
 
-TOOLS = [
-    {
-        "name": "list_clients",
-        "description": "Liefert alle verwalteten Rechner mit id, Name, Hostname, Tags, online/offline, CPU-, RAM- und "
-                       "Datenträger-Auslastung in Prozent, Laufzeit und Warnungen. Vor jeder Aktion aufrufen, um den "
-                       "gemeinten Rechner und seine id zu finden.",
-        "strict": True,
-        "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
-    },
-    {
-        "name": "power_action",
-        "description": "Startet einen Rechner neu (reboot), fährt ihn herunter (shutdown) oder weckt einen "
-                       "ausgeschalteten Rechner per Wake-on-LAN (wake). Der Anrufer wird vorher per Tastendruck um "
-                       "Bestätigung gebeten; das Ergebnis sagt, ob er bestätigt hat und ob es geklappt hat.",
-        "strict": True,
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "client_id": {"type": "string", "description": "id des Rechners aus list_clients"},
-                "action": {"type": "string", "enum": ["reboot", "shutdown", "wake"]},
-            },
-            "required": ["client_id", "action"],
-            "additionalProperties": False,
-        },
-    },
-]
+
+def _tool(name, desc, props=None, required=None):
+    return {"name": name, "description": desc, "strict": True,
+            "input_schema": {"type": "object", "properties": props or {}, "required": required or [], "additionalProperties": False}}
+
+
+CLIENT_ID = {"type": "string", "description": "id des Rechners aus list_clients"}
+HOST_ID = {"type": "string", "description": "host_id des Proxmox-Servers aus list_guests"}
+TOOLS = {
+    "status": [_tool("list_clients", "Liefert alle verwalteten Rechner mit id, Name, Hostname, Tags, online/offline, CPU-, RAM- und "
+                     "Datenträger-Auslastung in Prozent, Laufzeit und Warnungen. Vor jeder Aktion an einem Rechner aufrufen, "
+                     "um ihn und seine id zu finden.")],
+    "power": [_tool("power_action", "Startet einen Rechner neu (reboot), fährt ihn herunter (shutdown) oder weckt einen "
+                    "ausgeschalteten Rechner per Wake-on-LAN (wake).",
+                    {"client_id": CLIENT_ID, "action": {"type": "string", "enum": ["reboot", "shutdown", "wake"]}}, ["client_id", "action"])],
+    "processes": [
+        _tool("list_processes", "Die Programme eines Rechners, die gerade am meisten CPU oder Arbeitsspeicher brauchen "
+              "(gleichnamige Prozesse zusammengefasst, mit Anzahl).", {"client_id": CLIENT_ID}, ["client_id"]),
+        _tool("kill_process", "Beendet auf einem Rechner alle Prozesse mit diesem Programmnamen (z.B. chrome, notepad.exe; "
+              "Groß-/Kleinschreibung und .exe egal). Vorher list_processes aufrufen, um den genauen Namen zu kennen.",
+              {"client_id": CLIENT_ID, "name": {"type": "string"}}, ["client_id", "name"]),
+    ],
+    "services": [
+        _tool("find_services", "Sucht Dienste eines Rechners, deren Name oder Beschreibung den Suchbegriff enthält "
+              "(z.B. apache, spooler, docker). Liefert Name, Beschreibung und ob er läuft.",
+              {"client_id": CLIENT_ID, "query": {"type": "string"}}, ["client_id", "query"]),
+        _tool("service_action", "Startet, stoppt oder startet einen Dienst neu. name exakt wie von find_services geliefert.",
+              {"client_id": CLIENT_ID, "name": {"type": "string"}, "op": {"type": "string", "enum": ["start", "stop", "restart"]}},
+              ["client_id", "name", "op"]),
+    ],
+    "proxmox": [
+        _tool("list_guests", "Alle VMs und Container aller Proxmox-Server mit host_id, Server, vmid, Typ, Name, Status "
+              "(running/stopped), CPU- und RAM-Auslastung."),
+        _tool("guest_power", "Startet (start), fährt herunter (shutdown), startet neu (reboot) oder schaltet eine VM / einen "
+              "Container hart aus (stop – nur wenn er nicht mehr reagiert).",
+              {"host_id": HOST_ID, "vmid": {"type": "integer"}, "op": {"type": "string", "enum": ["start", "shutdown", "reboot", "stop"]}},
+              ["host_id", "vmid", "op"]),
+    ],
+    "pvedelete": [
+        _tool("delete_guest", "Löscht eine ausgeschaltete VM / einen Container endgültig samt Disks. Der Anrufer muss zur "
+              "Bestätigung die VM-Nummer auf der Telefontastatur eintippen.",
+              {"host_id": HOST_ID, "vmid": {"type": "integer"}}, ["host_id", "vmid"]),
+    ],
+    "scripts": [
+        _tool("list_scripts", "Die gespeicherten Skripte der Bibliothek mit id, Name und Beschreibung."),
+        _tool("run_script", "Führt ein gespeichertes Skript auf einem oder mehreren Rechnern aus und liefert Exit-Code und das "
+              "Ende der Ausgabe je Rechner.",
+              {"script_id": {"type": "string", "description": "id aus list_scripts"},
+               "client_ids": {"type": "array", "items": {"type": "string"}, "description": "ids aus list_clients"}},
+              ["script_id", "client_ids"]),
+    ],
+}
+GUEST_OPS = {"start": ("starten", "wird gestartet"), "shutdown": ("herunterfahren", "wird heruntergefahren"),
+             "reboot": ("neu starten", "wird neu gestartet"), "stop": ("hart ausschalten", "wurde ausgeschaltet")}
+SERVICE_OPS = {"start": ("starten", "wurde gestartet"), "stop": ("stoppen", "wurde gestoppt"), "restart": ("neu starten", "wurde neu gestartet")}
+
+
+def proc_key(name):
+    n = (name or "").lower()
+    return n[:-4] if n.endswith(".exe") else n
 
 
 class Assistant:
-    def __init__(self, rmm, model, effort):
+    def __init__(self, rmm, model, effort, scopes=None):
         self.rmm = rmm
         self.model = model
         self.effort = effort
         self.client = anthropic.Anthropic()
+        self.scopes = [s for s in (scopes or ["status", "power"]) if s in TOOLS]
+        if "status" not in self.scopes:
+            self.scopes.insert(0, "status")  # Rechner finden geht immer (Server prüft trotzdem)
+        self.tools = [t for s in self.scopes for t in TOOLS[s]]
+        if "pvedelete" in self.scopes and "proxmox" not in self.scopes:
+            self.tools.append(TOOLS["proxmox"][0])  # zum Löschen muss er die Gäste finden können (nur Liste)
+        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in self.scopes))
+        log.info("Rechte am Telefon: %s", ", ".join(self.scopes))
 
-    def _tool(self, name, args, confirm):
-        """Führt ein Tool aus. Gibt (Text, ist_fehler) zurück."""
+    # --- Hilfen ---
+    def _client(self, client_id, need_online=True):
+        a = next((x for x in self.rmm.clients() if x["id"] == client_id), None)
+        if not a:
+            raise ToolError("Diesen Rechner gibt es nicht. Erst list_clients aufrufen.")
+        if need_online and not a.get("online"):
+            raise ToolError(f"{a['name']} ist offline.")
+        return a
+
+    def _guests(self):
+        out = []
+        for h in self.rmm.clients():
+            if not (h.get("info") or {}).get("proxmox") or not h.get("online"):
+                continue
+            try:
+                for g in self.rmm.guests(h["id"]):
+                    if not g.get("template"):
+                        out.append({**g, "host_id": h["id"], "host": h["name"]})
+            except Exception as e:
+                log.warning("Gäste von %s nicht lesbar: %s", h["name"], e)
+        return out
+
+    def _guest(self, host_id, vmid):
+        g = next((x for x in self._guests() if x["host_id"] == host_id and x["vmid"] == vmid), None)
+        if not g:
+            raise ToolError("Diese VM gibt es nicht. Erst list_guests aufrufen.")
+        return g
+
+    def _tool(self, name, args, ui):
+        """Führt ein Werkzeug aus. Gibt (Text, ist_fehler) zurück."""
+        try:
+            return self._run_tool(name, args, ui), False
+        except ToolError as e:
+            return str(e), True
+
+    def _run_tool(self, name, args, ui):
+        allowed = {t["name"] for t in self.tools}
+        if name not in allowed:
+            raise ToolError(f"Werkzeug {name} ist nicht erlaubt.")
+        no = "Der Anrufer hat nicht bestätigt – nichts ausgeführt."
+
         if name == "list_clients":
-            return json.dumps([client_summary(a) for a in self.rmm.clients()], ensure_ascii=False), False
+            return json.dumps([client_summary(a) for a in self.rmm.clients()], ensure_ascii=False)
+
         if name == "power_action":
             action = args.get("action")
-            target = next((a for a in self.rmm.clients() if a["id"] == args.get("client_id")), None)
+            a = self._client(args.get("client_id"), need_online=action != "wake")
             if action not in VERBS:
-                return "Unbekannte Aktion.", True
-            if not target:
-                return "Diesen Rechner gibt es nicht. Erst list_clients aufrufen.", True
-            if action != "wake" and not target.get("online"):
-                return f"{target['name']} ist offline – das geht nur, wenn er online ist.", True
-            if action == "wake" and target.get("online"):
-                return f"{target['name']} ist bereits online.", True
-            if not confirm(f"Soll ich {target['name']} wirklich {VERBS[action]}?"):
-                return "Der Anrufer hat nicht bestätigt – nichts ausgeführt.", False
-            try:
-                self.rmm.power(target["id"], action)
-            except Exception as e:  # Fehler vom RMM-Server an Claude zurückgeben
-                return f"Fehlgeschlagen: {e}", True
-            log.info("Ausgeführt: %s -> %s", action, target["name"])
-            return f"Ausgeführt: {target['name']} {DONE[action]}.", False
-        return f"Unbekanntes Tool {name}.", True
+                raise ToolError("Unbekannte Aktion.")
+            if action == "wake" and a.get("online"):
+                raise ToolError(f"{a['name']} ist bereits online.")
+            if not ui.confirm(f"Soll ich {a['name']} wirklich {VERBS[action]}?"):
+                return no
+            self._do(lambda: self.rmm.power(a["id"], action))
+            log.info("Ausgeführt: %s -> %s", action, a["name"])
+            return f"Ausgeführt: {a['name']} {DONE[action]}."
 
-    def ask(self, messages, text, confirm):
-        """Verarbeitet einen Satz des Anrufers. messages wird fortgeschrieben (nur anhängen)."""
+        if name == "list_processes":
+            a = self._client(args.get("client_id"))
+            groups = {}
+            for p in self._do(lambda: self.rmm.action(a["id"], "processes")):
+                k = proc_key(p.get("name"))
+                g = groups.setdefault(k, {"name": p.get("name"), "count": 0, "cpu_percent": 0.0, "ram_mb": 0})
+                g["count"] += 1
+                g["cpu_percent"] += p.get("cpu") or 0
+                g["ram_mb"] += round((p.get("mem") or 0) / 1048576)
+            top = sorted(groups.values(), key=lambda g: (g["cpu_percent"], g["ram_mb"]), reverse=True)[:20]
+            for g in top:
+                g["cpu_percent"] = round(g["cpu_percent"], 1)
+            return json.dumps({"rechner": a["name"], "programme": top}, ensure_ascii=False)
+
+        if name == "kill_process":
+            a = self._client(args.get("client_id"))
+            want = proc_key(args.get("name"))
+            procs = [p for p in self._do(lambda: self.rmm.action(a["id"], "processes")) if proc_key(p.get("name")) == want]
+            if not procs:
+                raise ToolError(f"Auf {a['name']} läuft kein Programm namens {args.get('name')}. Erst list_processes aufrufen.")
+            label = procs[0].get("name")
+            many = f" ({len(procs)} Prozesse)" if len(procs) > 1 else ""
+            if not ui.confirm(f"Soll ich {label} auf {a['name']} beenden{many}?"):
+                return no
+            done, failed = 0, []
+            for p in procs:
+                try:
+                    self.rmm.action(a["id"], "kill", {"pid": p["pid"], "name": p.get("name")})
+                    done += 1
+                except Exception as e:
+                    failed.append(str(e))
+            log.info("Ausgeführt: %s beendet auf %s (%d/%d)", label, a["name"], done, len(procs))
+            return f"{label} auf {a['name']}: {done} von {len(procs)} Prozessen beendet." + (f" Fehler: {failed[0]}" if failed else "")
+
+        if name == "find_services":
+            a = self._client(args.get("client_id"))
+            q = (args.get("query") or "").lower()
+            hits = [s for s in self._do(lambda: self.rmm.action(a["id"], "services"))
+                    if q in (s.get("name") or "").lower() or q in (s.get("description") or "").lower()]
+            return json.dumps({"rechner": a["name"], "treffer": len(hits), "dienste": [
+                {"name": s["name"], "beschreibung": s.get("description"), "läuft": s.get("active")} for s in hits[:15]]}, ensure_ascii=False)
+
+        if name == "service_action":
+            a = self._client(args.get("client_id"))
+            op, svc = args.get("op"), args.get("name")
+            if op not in SERVICE_OPS:
+                raise ToolError("Unbekannte Aktion.")
+            if not ui.confirm(f"Soll ich den Dienst {svc} auf {a['name']} {SERVICE_OPS[op][0]}?"):
+                return no
+            self._do(lambda: self.rmm.action(a["id"], "service", {"name": svc, "op": op}))
+            log.info("Ausgeführt: Dienst %s %s auf %s", svc, op, a["name"])
+            return f"Dienst {svc} auf {a['name']} {SERVICE_OPS[op][1]}."
+
+        if name == "list_guests":
+            return json.dumps([{"host_id": g["host_id"], "server": g["host"], "vmid": g["vmid"],
+                                "typ": "Container" if g["type"] == "lxc" else "VM", "name": g.get("name"), "status": g.get("status"),
+                                **({"cpu_percent": round((g.get("cpu") or 0) * 100), "ram_percent": round(100 * g["mem"] / g["maxmem"])}
+                                   if g.get("status") == "running" and g.get("maxmem") else {})} for g in self._guests()], ensure_ascii=False)
+
+        if name == "guest_power":
+            op = args.get("op")
+            if op not in GUEST_OPS:
+                raise ToolError("Unbekannte Aktion.")
+            g = self._guest(args.get("host_id"), args.get("vmid"))
+            running = g.get("status") == "running"
+            if op == "start" and running:
+                raise ToolError(f"{g['name']} läuft bereits.")
+            if op != "start" and not running:
+                raise ToolError(f"{g['name']} ist bereits aus.")
+            if not ui.confirm(f"Soll ich {g['name']} auf {g['host']} {GUEST_OPS[op][0]}?"):
+                return no
+            self._do(lambda: self.rmm.guest_power(g["host_id"], g, op))
+            log.info("Ausgeführt: %s %s auf %s", g["name"], op, g["host"])
+            return f"{g['name']} {GUEST_OPS[op][1]}."
+
+        if name == "delete_guest":
+            g = self._guest(args.get("host_id"), args.get("vmid"))
+            if g.get("status") == "running":
+                raise ToolError(f"{g['name']} läuft noch – zum Löschen muss die VM erst heruntergefahren werden.")
+            what = "den Container" if g["type"] == "lxc" else "die VM"
+            if not ui.confirm_code(f"Achtung, endgültig: Soll ich {what} {g['name']} auf {g['host']} mit allen Daten löschen?", g["vmid"]):
+                return "Die Nummer wurde nicht richtig eingetippt – nichts gelöscht."
+            self._do(lambda: self.rmm.guest_destroy(g["host_id"], g))
+            log.warning("Ausgeführt: %s %s auf %s GELÖSCHT", what, g["name"], g["host"])
+            return f"{g['name']} wird gelöscht."
+
+        if name == "list_scripts":
+            return json.dumps([{"id": s["id"], "name": s["name"], "beschreibung": s.get("description", "")} for s in self.rmm.scripts()], ensure_ascii=False)
+
+        if name == "run_script":
+            s = next((x for x in self.rmm.scripts() if x["id"] == args.get("script_id")), None)
+            if not s:
+                raise ToolError("Dieses Skript gibt es nicht. Erst list_scripts aufrufen.")
+            targets = [self._client(cid) for cid in dict.fromkeys(args.get("client_ids") or [])]
+            if not targets:
+                raise ToolError("Kein Rechner angegeben.")
+            names = ", ".join(t["name"] for t in targets)
+            if not ui.confirm(f"Soll ich das Skript {s['name']} auf {names} ausführen?"):
+                return no
+            ui.hint("Einen Moment.")
+            res = self._do(lambda: self.rmm.run_script(s["id"], [t["id"] for t in targets]))
+            log.info("Ausgeführt: Skript %s auf %s", s["name"], names)
+            return json.dumps([{"rechner": r.get("hostname"), "fehler": r.get("error"), "exit_code": r.get("exitCode"),
+                                "zeitüberschreitung": r.get("timedOut"), "ausgabe_ende": (r.get("output") or "")[-600:]} for r in res], ensure_ascii=False)
+
+        raise ToolError(f"Unbekanntes Werkzeug {name}.")
+
+    @staticmethod
+    def _do(fn):
+        try:
+            return fn()
+        except Exception as e:  # Fehler vom RMM-Server an Claude zurückgeben
+            raise ToolError(f"Fehlgeschlagen: {e}") from e
+
+    def ask(self, messages, text, ui):
+        """Verarbeitet einen Satz des Anrufers. messages wird fortgeschrieben (nur anhängen).
+        ui: confirm(frage) -> bool, confirm_code(frage, nummer) -> bool, hint(text)."""
         messages.append({"role": "user", "content": text})
-        for _ in range(8):
+        for _ in range(10):
             try:
                 resp = self.client.beta.messages.create(
                     model=self.model,
                     max_tokens=16000,
-                    system=SYSTEM,
-                    tools=TOOLS,
+                    system=self.system,
+                    tools=self.tools,
                     messages=messages,
                     output_config={"effort": self.effort},
                     betas=["server-side-fallback-2026-07-01"],
@@ -412,7 +646,7 @@ class Assistant:
                     if block.type != "tool_use":
                         continue
                     try:
-                        out, err = self._tool(block.name, block.input, confirm)
+                        out, err = self._tool(block.name, block.input, ui)
                     except Hangup:
                         raise
                     except Exception as e:
@@ -423,6 +657,10 @@ class Assistant:
             spoken = " ".join(b.text for b in resp.content if b.type == "text").strip()
             return spoken or "Erledigt."
         return "Das hat zu lange gedauert. Bitte versuch es noch einmal."
+
+
+class ToolError(Exception):
+    """Fehler, der als Werkzeug-Ergebnis an Claude zurückgeht."""
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +807,16 @@ class CallSession:
                 return ok
         return False
 
+    def confirm_code(self, question, code):
+        """Besonders gefährliche Aktionen: Bestätigung durch Eintippen einer Nummer (z.B. der VM-ID)."""
+        self.flush_dtmf()
+        digits = " ".join(str(code))
+        self.say(f"{question} Zum Bestätigen tippe die Nummer {digits} und dann die Raute-Taste. Zum Abbrechen einfach Raute.")
+        got = self.read_digits(timeout=25)
+        ok = got == str(code)
+        log.info("Rückfrage mit Nummer '%s' -> %s", question, "bestätigt" if ok else "abgelehnt")
+        return ok
+
     # --- Eingabe: Sprache ---
     def record(self, max_seconds=15, wait_seconds=7, end_silence=1.2, dtmf=False):
         """Sprache aufnehmen bis zur Pause. Mit dtmf=True beendet ein Tastendruck die Aufnahme (gibt die Taste zurück)."""
@@ -653,7 +901,7 @@ class CallSession:
                 return
             misses = 0
             self.hint("Einen Moment.")
-            reply = app.assistant.ask(messages, text, self.confirm)
+            reply = app.assistant.ask(messages, text, self)
             self.say(reply)
             self.say("Noch etwas?")
 
@@ -662,7 +910,7 @@ class App:
     def __init__(self, cfg, with_phone=True):
         self.cfg = cfg
         self.rmm = Rmm(cfg["rmm_url"], cfg["rmm_token"])
-        self.assistant = Assistant(self.rmm, cfg["model"], cfg["effort"])
+        self.assistant = Assistant(self.rmm, cfg["model"], cfg["effort"], self.rmm.scopes())
         self.lockout = Lockout()
         self._names, self._names_at = [], 0
         if with_phone:
@@ -794,8 +1042,21 @@ def run_phone(cfg):
 def run_text_test(cfg, text):
     """Testet Claude + RMM ohne Telefon; Rückfragen beantwortest du in der Konsole."""
     app = App(cfg, with_phone=False)
-    confirm = lambda q: (lambda a: a in ("j", "1") or classify_answer(a) is True)(input(f"{q} [ja/nein] ").strip().lower())
-    print(app.assistant.ask([], text, confirm))
+    class Console:
+        @staticmethod
+        def confirm(q):
+            a = input(f"{q} [ja/nein] ").strip().lower()
+            return a in ("j", "1") or classify_answer(a) is True
+
+        @staticmethod
+        def confirm_code(q, code):
+            return input(f"{q} Nummer eintippen ({code}): ").strip() == str(code)
+
+        @staticmethod
+        def hint(t):
+            print(t)
+
+    print(app.assistant.ask([], text, Console))
 
 
 def run_tts_test(cfg, text, out):
