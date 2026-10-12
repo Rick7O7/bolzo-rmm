@@ -46,7 +46,7 @@ COMMON_PHRASES = [
     "Falsche Pin. Bitte noch einmal.",
     "Hallo! Was soll ich tun?",
     "Einen Moment.",
-    "Noch etwas?",
+    "Sonst noch etwas?",
     "Ich habe nichts gehört. Was soll ich tun?",
     "Das habe ich nicht verstanden. Bitte noch einmal.",
     "Alles klar. Auf Wiederhören.",
@@ -360,7 +360,12 @@ Werkzeug je Ziel einmal auf.
 
 Deine Antworten werden vorgelesen: höchstens zwei bis drei kurze Sätze, keine Listen, kein Markdown,
 keine Emojis, keine IDs oder PIDs. Zahlen rund und gesprochen ("85 Prozent"). Bei vielen Treffern nur die
-wichtigsten nennen. Sprich Deutsch."""
+wichtigsten nennen. Sprich Deutsch.
+
+Nachfragen nur, wenn es passt: Musst du etwas wissen, endet die Antwort mit genau dieser einen Frage.
+Hast du gerade eine Aktion ausgeführt, darfst du knapp anbieten weiterzumachen ("Sonst noch was?").
+Nach reinen Auskünften stellst du keine Frage – der Anrufer spricht von selbst weiter, wenn er mehr will.
+Niemals "Noch etwas?" oder ähnliche Floskeln nach jeder Antwort."""
 
 
 def _tool(name, desc, props=None, required=None):
@@ -878,7 +883,7 @@ class CallSession:
                 return
             self.say("Falsche Pin. Bitte noch einmal.")
 
-        messages, misses = [], 0
+        messages, misses, answered = [], 0, False
         self.say("Hallo! Was soll ich tun?")
         while True:
             audio = self.record()
@@ -887,7 +892,8 @@ class CallSession:
                 if misses >= 2:
                     self.say("Ich höre nichts mehr. Auf Wiederhören.")
                     return
-                self.say("Ich habe nichts gehört. Was soll ich tun?")
+                # Nach einer Antwort ist eine Pause der passende Moment für "Sonst noch etwas?"
+                self.say("Sonst noch etwas?" if answered else "Ich habe nichts gehört. Was soll ich tun?")
                 continue
             hint = "BOLZO RMM. Rechner: " + ", ".join(app.client_names())
             text = app.stt.transcribe(audio, hint)
@@ -902,8 +908,8 @@ class CallSession:
             misses = 0
             self.hint("Einen Moment.")
             reply = app.assistant.ask(messages, text, self)
-            self.say(reply)
-            self.say("Noch etwas?")
+            self.say(reply)  # ob Claude am Ende nachfragt, entscheidet es selbst (siehe SYSTEM)
+            answered = True
 
 
 class App:
