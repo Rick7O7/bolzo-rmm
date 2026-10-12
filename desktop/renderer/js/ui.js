@@ -177,6 +177,12 @@ export function installWindowControls() {
     <button data-wc="close" class="wc-close" title="Schließen">${WC_ICONS.close}</button>
   </div>`);
   document.body.append(box);
+  // Electron wertet Zieh-Bereiche (-webkit-app-region) in Dokument-Reihenfolge aus: Wird danach z.B. die
+  // Konsolenleiste eingefügt, überdeckt ihr Zieh-Bereich die Knöpfe und Klicks verschieben nur das Fenster.
+  // Deshalb bleiben die Knöpfe immer das letzte Element.
+  new MutationObserver(() => {
+    if (document.body.lastElementChild !== box) document.body.append(box);
+  }).observe(document.body, { childList: true });
   const maxBtn = $('[data-wc="max"]', box);
   const draw = (st) => {
     const big = st?.maximized || st?.fullscreen;
