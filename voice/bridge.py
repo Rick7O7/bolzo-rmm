@@ -10,10 +10,13 @@ Testen ohne Telefon:  bridge.py --test-text "Welche Server sind offline?"
 """
 import argparse
 import collections
+import hashlib
 import hmac
 import json
 import logging
+import math
 import os
+import queue
 import re
 import signal
 import socket
@@ -33,6 +36,18 @@ RATE = 8000          # Telefon-Abtastrate
 FRAME = 160          # 20 ms bei 8 kHz, 8 bit
 VERBS = {"reboot": "neu starten", "shutdown": "herunterfahren", "wake": "aufwecken"}
 DONE = {"reboot": "wird neu gestartet", "shutdown": "wird heruntergefahren", "wake": "wird aufgeweckt"}
+# werden beim Start einmal erzeugt und auf Platte gespeichert
+COMMON_PHRASES = [
+    "BOLZO RMM. Bitte gib deine PIN ein und bestätige mit Raute.",
+    "Ich habe keine Ziffern erhalten. Bitte gib deine PIN ein und bestätige mit Raute.",
+    "Falsche PIN. Bitte noch einmal.",
+    "Hallo! Was soll ich tun?",
+    "Einen Moment.",
+    "Noch etwas?",
+    "Ich habe nichts gehört. Was soll ich tun?",
+    "Das habe ich nicht verstanden. Bitte noch einmal.",
+    "Alles klar. Auf Wiederhören.",
+]
 GOODBYE = re.compile(r"^(nein|nichts|danke|tschüss|tschüs|ende|auflegen|das war'?s|das wars|bye)\b")
 
 
@@ -58,6 +73,7 @@ def load_config():
         "whisper_dir": e("WHISPER_DIR", "/opt/bolzo-voice/models"),
         "piper_bin": e("PIPER_BIN", "/opt/bolzo-voice/piper/piper"),
         "piper_voice": e("PIPER_VOICE", "/opt/bolzo-voice/voices/de_DE-thorsten-medium.onnx"),
+        "tts_cache": e("TTS_CACHE", "/opt/bolzo-voice/cache"),
     }
     return cfg
 
@@ -91,37 +107,113 @@ def resample(x, src, dst):
 
 
 # ---------------------------------------------------------------------------
-# Sprachausgabe (Piper)
+# Sprachausgabe
 # ---------------------------------------------------------------------------
+def to_phone(x, src_rate):
+    """Float-Audio (-1..1) -> Telefon-Audio (8 kHz, 8 bit unsigned) mit sauberem Tiefpass und Pegel."""
+    x = np.asarray(x, dtype=np.float32)
+    try:
+        from scipy.signal import resample_poly
+        g = math.gcd(int(src_rate), RATE)
+        out = resample_poly(x, RATE // g, int(src_rate) // g).astype(np.float32)
+    except ImportError:
+        k = max(1, round(src_rate / RATE))
+        if k > 1:
+            x = np.convolve(x, np.ones(k) / k, mode="same")
+        out = resample(x, src_rate, RATE)
+    peak = float(np.max(np.abs(out))) if len(out) else 0
+    if peak > 1e-3:
+        out = out * (0.8 / peak)
+    return float_to_u8(out) + bytes([128]) * (RATE // 5)  # 200 ms Pause danach
+
+
+def split_sentences(text, min_len=25):
+    """Antwort in Sätze teilen, damit der erste schon gesprochen wird, während die nächsten entstehen."""
+    parts, buf = [], ""
+    for p in re.split(r"(?<=[.!?:;])\s+", text.strip()):
+        buf = f"{buf} {p}".strip()
+        if len(buf) >= min_len:
+            parts.append(buf)
+            buf = ""
+    if buf:
+        if parts and len(buf) < min_len:
+            parts[-1] += " " + buf
+        else:
+            parts.append(buf)
+    return parts or [text]
+
+
 class Tts:
-    def __init__(self, piper_bin, voice):
-        self.bin = piper_bin
-        self.voice = voice
-        with open(voice + ".json", encoding="utf8") as f:
-            self.rate = json.load(f)["audio"]["sample_rate"]
+    """Basis: Speicher im RAM und auf Platte (Ansagen wiederholen sich) + Umrechnung auf Telefon-Audio."""
+    name = "tts"
+
+    def __init__(self, cache_dir=None):
         self.cache = {}
         self.lock = threading.Lock()
+        self.cache_dir = cache_dir
+        if cache_dir:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+            except OSError:
+                self.cache_dir = None
+
+    def _render(self, text):
+        raise NotImplementedError
 
     def synth(self, text):
         """Text -> Telefon-Audio (8 kHz, 8 bit)."""
         if text in self.cache:
             return self.cache[text]
+        path = None
+        if self.cache_dir:
+            key = hashlib.sha256(f"{self.name}\n{text}".encode("utf8")).hexdigest()[:32]
+            path = os.path.join(self.cache_dir, key + ".u8")
+            try:
+                with open(path, "rb") as f:
+                    audio = f.read()
+                self.cache[text] = audio
+                return audio
+            except OSError:
+                pass
         with self.lock:
-            p = subprocess.run([self.bin, "--model", self.voice, "--output_raw"], input=text.encode("utf8"),
-                               capture_output=True, timeout=60, check=True)
-        pcm = np.frombuffer(p.stdout, dtype="<i2").astype(np.float32) / 32768.0
-        # leichter Tiefpass gegen Aliasing, dann auf 8 kHz und lauter machen
-        k = max(1, round(self.rate / RATE))
-        if k > 1:
-            pcm = np.convolve(pcm, np.ones(k) / k, mode="same")
-        out = resample(pcm, self.rate, RATE)
-        peak = float(np.max(np.abs(out))) if len(out) else 0
-        if peak > 1e-3:
-            out = out * (0.9 / peak)
-        audio = float_to_u8(out) + bytes([128]) * (RATE // 5)  # 200 ms Pause danach
+            t0 = time.time()
+            x, rate = self._render(text)
+        audio = to_phone(x, rate)
+        log.info("Sprachausgabe: %.1fs Audio in %.1fs erzeugt", len(audio) / RATE, time.time() - t0)
         if len(self.cache) < 200:
             self.cache[text] = audio
+        if path:
+            self._store(path, audio)
         return audio
+
+    def _store(self, path, audio):
+        try:
+            with open(path, "wb") as f:
+                f.write(audio)
+            files = sorted((os.path.join(self.cache_dir, n) for n in os.listdir(self.cache_dir)), key=os.path.getmtime)
+            for old in files[:-500]:  # höchstens 500 Ansagen behalten
+                os.remove(old)
+        except OSError:
+            pass
+
+
+class PiperTts(Tts):
+    def __init__(self, piper_bin, voice, cache_dir=None):
+        super().__init__(cache_dir)
+        self.bin = piper_bin
+        self.voice = voice
+        self.name = "piper:" + os.path.basename(voice)
+        with open(voice + ".json", encoding="utf8") as f:
+            self.rate = json.load(f)["audio"]["sample_rate"]
+
+    def _render(self, text):
+        p = subprocess.run([self.bin, "--model", self.voice, "--output_raw"], input=text.encode("utf8"),
+                           capture_output=True, timeout=60, check=True)
+        return np.frombuffer(p.stdout, dtype="<i2").astype(np.float32) / 32768.0, self.rate
+
+
+def make_tts(cfg):
+    return PiperTts(cfg["piper_bin"], cfg["piper_voice"], cfg["tts_cache"])
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +457,7 @@ class CallSession:
     def __init__(self, app, call):
         self.app = app
         self.call = call
+        self.out_end = 0.0  # bis wann bereits geschriebenes Audio noch abgespielt wird
 
     def alive(self):
         from pyVoIP.VoIP import CallState
@@ -372,18 +465,49 @@ class CallSession:
             raise Hangup()
 
     # --- Ausgabe ---
-    def play(self, audio):
-        self.alive()
-        self.call.write_audio(audio)
-        end = time.time() + len(audio) / RATE
-        while time.time() < end:  # während der Ansage eingehendes Audio verwerfen
-            self.alive()
-            self.call.read_audio(FRAME, blocking=False)
-            time.sleep(0.02)
+    def drain(self):
+        """Bisher eingegangenes Audio verwerfen (während Ansagen, Spracherkennung und Claude)."""
+        self.call.read_audio(RATE * 120, blocking=False)
 
     def say(self, text):
+        """Satz für Satz erzeugen und abspielen – der erste Satz läuft schon, während die nächsten entstehen."""
         log.info("Ansage: %s", text)
-        self.play(self.app.tts.synth(text))
+        q = queue.Queue()
+
+        def produce():
+            try:
+                for part in split_sentences(text):
+                    q.put(self.app.tts.synth(part))
+            except Exception:
+                log.exception("Sprachausgabe fehlgeschlagen")
+            q.put(None)
+
+        threading.Thread(target=produce, name="Sprachausgabe", daemon=True).start()
+        while True:
+            self.alive()
+            try:
+                audio = q.get(timeout=0.05)
+            except queue.Empty:
+                self.drain()
+                continue
+            if audio is None:
+                break
+            self.queue_audio(audio)
+        while time.time() < self.out_end:
+            self.alive()
+            self.drain()
+            time.sleep(0.02)
+        self.drain()
+
+    def hint(self, text):
+        """Kurze, vorab erzeugte Ansage abspielen, ohne zu warten (z.B. während Claude nachdenkt)."""
+        audio = self.app.tts.cache.get(text)
+        if audio:
+            self.queue_audio(audio)
+
+    def queue_audio(self, audio):
+        self.call.write_audio(audio)  # pyVoIP hängt an bereits wartendes Audio an
+        self.out_end = max(self.out_end, time.time()) + len(audio) / RATE
 
     # --- Eingabe: Tasten ---
     def flush_dtmf(self):
@@ -416,6 +540,7 @@ class CallSession:
 
     # --- Eingabe: Sprache ---
     def record(self, max_seconds=15, wait_seconds=7, end_silence=1.2):
+        self.drain()
         pre = collections.deque(maxlen=12)
         frames, speech, silent, noise = [], False, 0, []
         start = time.time()
@@ -491,6 +616,7 @@ class CallSession:
                 self.say("Alles klar. Auf Wiederhören.")
                 return
             misses = 0
+            self.hint("Einen Moment.")
             reply = app.assistant.ask(messages, text, self.confirm)
             self.say(reply)
             self.say("Noch etwas?")
@@ -504,7 +630,7 @@ class App:
         self.lockout = Lockout()
         self._names, self._names_at = [], 0
         if with_phone:
-            self.tts = Tts(cfg["piper_bin"], cfg["piper_voice"])
+            self.tts = make_tts(cfg)
             self.stt = Stt(cfg["whisper_model"], cfg["whisper_dir"])
 
     def client_names(self):
@@ -597,10 +723,9 @@ def run_phone(cfg):
         log.info("BOLZO RMM erreichbar: %d Rechner", len(app.rmm.clients()))
     except Exception as e:
         log.error("BOLZO RMM nicht erreichbar (%s) – prüfe RMM_URL und RMM_TOKEN", e)
-    for phrase in ["BOLZO RMM. Bitte gib deine PIN ein und bestätige mit Raute.", "Hallo! Was soll ich tun?", "Noch etwas?",
-                   "Ich habe keine Ziffern erhalten. Bitte gib deine PIN ein und bestätige mit Raute.",
-                   "Falsche PIN. Bitte noch einmal."]:
-        app.tts.synth(phrase)  # häufige Ansagen vorab erzeugen
+    log.info("Erzeuge häufige Ansagen vorab ...")
+    for phrase in COMMON_PHRASES:
+        app.tts.synth(phrase)
 
     my_ip = cfg["local_ip"] or local_ip_towards(cfg["fritzbox"], cfg["sip_port"])
     phone = VoIPPhone(cfg["fritzbox"], cfg["sip_port"], cfg["sip_user"], cfg["sip_pass"],
@@ -638,13 +763,15 @@ def run_text_test(cfg, text):
 
 
 def run_tts_test(cfg, text, out):
-    tts = Tts(cfg["piper_bin"], cfg["piper_voice"])
+    tts = make_tts(cfg)
+    t0 = time.time()
+    audio = b"".join(tts.synth(p) for p in split_sentences(text))
     with wave.open(out, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(1)
         w.setframerate(RATE)
-        w.writeframes(tts.synth(text))
-    print(f"Telefon-Audio geschrieben: {out}")
+        w.writeframes(audio)
+    print(f"Telefon-Audio geschrieben: {out} ({len(audio) / RATE:.1f}s Audio in {time.time() - t0:.1f}s erzeugt)")
 
 
 def main():

@@ -5,3 +5,4 @@ faster-whisper>=1.0
 pyVoIP>=1.6,<2
 # pyVoIP 1.6 nutzt das Modul audioop, das ab Python 3.13 entfernt wurde
 audioop-lts; python_version >= "3.13"
+scipy>=1.11
