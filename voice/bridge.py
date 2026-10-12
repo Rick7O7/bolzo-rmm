@@ -560,7 +560,13 @@ def run_phone(cfg):
                       myIP=my_ip, callCallback=app.on_call, sipPort=cfg["local_sip_port"])
     phone.start()
     if phone.get_status().name != "REGISTERED":
-        log.error("Anmeldung an der FRITZ!Box fehlgeschlagen (%s) – SIP_USER/SIP_PASS prüfen", phone.get_status().name)
+        try:
+            fb_ip = socket.gethostbyname(cfg["fritzbox"])
+        except OSError:
+            fb_ip = "nicht auflösbar"
+        log.error("Anmeldung an der FRITZ!Box fehlgeschlagen: keine Antwort von %s (%s) Port %s. "
+                  "Liegt dieses Gerät im selben Netz wie die FRITZ!Box? Sonst FRITZBOX_HOST auf die IP der FRITZ!Box setzen.",
+                  cfg["fritzbox"], fb_ip, cfg["sip_port"])
     log.info("Als IP-Telefon '%s' bei %s angemeldet (eigene IP %s) – warte auf Anrufe", cfg["sip_user"], cfg["fritzbox"], my_ip)
 
     stop = threading.Event()

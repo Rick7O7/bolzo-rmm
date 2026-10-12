@@ -125,7 +125,7 @@ async function openVmConsole(g) {
 }
 
 function openContainerConsole(g) {
-  const { overlay, screen, status } = consoleFrame(g, `<span class="muted" style="font-size:12px">Markieren = kopieren (Strg+C) · Strg+V = einfügen</span>`);
+  const { overlay, screen, status } = consoleFrame(g, `<span class="muted" style="font-size:12px">Markieren + Strg+C = kopieren · Strg+V oder Rechtsklick = einfügen</span>`);
   screen.classList.add('term-host');
   const term = new RemoteTerminal(screen, g.hostId, {
     extra: { lxc: g.vmid, name: g.name },

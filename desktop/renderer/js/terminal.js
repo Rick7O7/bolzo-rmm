@@ -52,7 +52,7 @@ export class RemoteTerminal {
     this.fit.fit();
 
     this.term.onData((d) => this._input(d));
-    // Strg+C kopiert, wenn Text markiert ist; Strg+V fügt ein
+    // Strg+C kopiert, wenn Text markiert ist
     this.term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       if (e.ctrlKey && e.key === 'c' && this.term.hasSelection()) {
@@ -60,11 +60,21 @@ export class RemoteTerminal {
         this.term.clearSelection();
         return false;
       }
-      if (e.ctrlKey && e.key === 'v') {
-        navigator.clipboard.readText().then((t) => this._input(t));
-        return false;
-      }
+      // Strg+V: nur das Steuerzeichen unterdrücken – das Einfügen selbst übernimmt das
+      // Paste-Ereignis des Browsers (vorher wurde zusätzlich manuell eingefügt → doppelt)
+      if (e.ctrlKey && e.key === 'v') return false;
       return true;
+    });
+    // Rechtsklick: markierten Text kopieren, sonst Zwischenablage einfügen (wie PuTTY/Windows-Terminal)
+    host.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (this.term.hasSelection()) {
+        navigator.clipboard.writeText(this.term.getSelection());
+        this.term.clearSelection();
+      } else {
+        navigator.clipboard.readText().then((t) => { if (t) this.term.paste(t); }).catch(() => {});
+      }
+      this.term.focus();
     });
 
     this.offShell = api.on('shell', (m) => this._onShell(m));
