@@ -36,11 +36,14 @@ RATE = 8000          # Telefon-Abtastrate
 FRAME = 160          # 20 ms bei 8 kHz, 8 bit
 VERBS = {"reboot": "neu starten", "shutdown": "herunterfahren", "wake": "aufwecken"}
 DONE = {"reboot": "wird neu gestartet", "shutdown": "wird heruntergefahren", "wake": "wird aufgeweckt"}
+# Schreibweise so, wie die Stimme es richtig ausspricht (am Telefon mit Spracherkennung geprüft)
+GREETING = "Hallo, hier ist Bollzo Nettwörks. Bitte gib deine Pin ein und drücke danach die Raute-Taste."
+NO_DIGITS = "Ich habe keine Ziffern erhalten. Bitte gib deine Pin ein und drücke danach die Raute-Taste."
 # werden beim Start einmal erzeugt und auf Platte gespeichert
 COMMON_PHRASES = [
-    "BOLZO RMM. Bitte gib deine PIN ein und bestätige mit Raute.",
-    "Ich habe keine Ziffern erhalten. Bitte gib deine PIN ein und bestätige mit Raute.",
-    "Falsche PIN. Bitte noch einmal.",
+    GREETING,
+    NO_DIGITS,
+    "Falsche Pin. Bitte noch einmal.",
     "Hallo! Was soll ich tun?",
     "Einen Moment.",
     "Noch etwas?",
@@ -48,6 +51,21 @@ COMMON_PHRASES = [
     "Das habe ich nicht verstanden. Bitte noch einmal.",
     "Alles klar. Auf Wiederhören.",
 ]
+# Antworten auf Rückfragen ("Soll ich X wirklich neu starten?") – ein Nein schlägt immer ein Ja
+YES = re.compile(r"\b(ja+|jawohl|jap|jo|yes|genau|richtig|korrekt|bestätigt?|ok(ay)?|klar|gerne?|mach(e|s)?|tu es|bitte ja)\b")
+NO = re.compile(r"\b(nein|nee|ne|nö|no|nicht|kein|keine|stopp?|abbrechen|abbruch|halt|warte|später)\b")
+
+
+def classify_answer(text):
+    """True = ja, False = nein, None = unklar."""
+    t = (text or "").lower()
+    if NO.search(t):
+        return False
+    if YES.search(t):
+        return True
+    return None
+
+
 GOODBYE = re.compile(r"^(nein|nichts|danke|tschüss|tschüs|ende|auflegen|das war'?s|das wars|bye)\b")
 
 
@@ -532,20 +550,38 @@ class CallSession:
         return digits
 
     def confirm(self, question):
+        """Rückfrage per Sprache ("ja"/"nein"); Taste 1 geht weiterhin. Unklar oder still = nicht ausführen."""
         self.flush_dtmf()
-        self.say(question + " Drücke die 1 zum Bestätigen.")
-        ok = self.read_digits(timeout=10, max_len=1) == "1"
-        log.info("Rückfrage '%s' -> %s", question, "bestätigt" if ok else "abgelehnt")
-        return ok
+        prompts = [question + " Sag ja oder nein.", "Bitte sag ja oder nein. Oder drücke die 1."]
+        for prompt in prompts:
+            self.say(prompt)
+            got = self.record(max_seconds=4, wait_seconds=8, end_silence=0.8, dtmf=True)
+            if isinstance(got, str):
+                ok, heard = got == "1", f"Taste {got}"
+            elif got is None:
+                ok, heard = None, "(nichts gehört)"
+            else:
+                heard = self.app.stt.transcribe(got, "Ja. Nein. Ja, bitte. Nein, nicht.")
+                ok = classify_answer(heard)
+            log.info("Rückfrage '%s' -> %s: %s", question, heard,
+                     {True: "bestätigt", False: "abgelehnt", None: "unklar"}[ok])
+            if ok is not None:
+                return ok
+        return False
 
     # --- Eingabe: Sprache ---
-    def record(self, max_seconds=15, wait_seconds=7, end_silence=1.2):
+    def record(self, max_seconds=15, wait_seconds=7, end_silence=1.2, dtmf=False):
+        """Sprache aufnehmen bis zur Pause. Mit dtmf=True beendet ein Tastendruck die Aufnahme (gibt die Taste zurück)."""
         self.drain()
         pre = collections.deque(maxlen=12)
         frames, speech, silent, noise = [], False, 0, []
         start = time.time()
         while True:
             self.alive()
+            if dtmf:
+                key = self.call.get_dtmf(length=1)
+                if key:
+                    return key
             x = u8_to_float(self.call.read_audio(FRAME, blocking=True))
             rms = float(np.sqrt(np.mean(x * x))) if len(x) else 0.0
             if not speech and len(noise) < 15:
@@ -571,7 +607,7 @@ class CallSession:
     # --- Ablauf ---
     def run(self):
         app = self.app
-        self.say("BOLZO RMM. Bitte gib deine PIN ein und bestätige mit Raute.")
+        self.say(GREETING)
         wrong = empty = 0
         while True:
             pin = self.read_digits()
@@ -582,7 +618,7 @@ class CallSession:
                 if empty >= 3:
                     self.say("Keine Eingabe erhalten. Auf Wiederhören.")
                     return
-                self.say("Ich habe keine Ziffern erhalten. Bitte gib deine PIN ein und bestätige mit Raute.")
+                self.say(NO_DIGITS)
                 continue
             if hmac.compare_digest(pin, app.cfg["pin"]):
                 break
@@ -590,9 +626,9 @@ class CallSession:
             app.lockout.fail()
             log.warning("Falsche PIN (Versuch %d, %d Ziffern)", wrong, len(pin))
             if wrong >= 3 or app.lockout.locked():
-                self.say("Die PIN ist falsch. Auf Wiederhören.")
+                self.say("Die Pin ist falsch. Auf Wiederhören.")
                 return
-            self.say("Falsche PIN. Bitte noch einmal.")
+            self.say("Falsche Pin. Bitte noch einmal.")
 
         messages, misses = [], 0
         self.say("Hallo! Was soll ich tun?")
@@ -758,7 +794,7 @@ def run_phone(cfg):
 def run_text_test(cfg, text):
     """Testet Claude + RMM ohne Telefon; Rückfragen beantwortest du in der Konsole."""
     app = App(cfg, with_phone=False)
-    confirm = lambda q: input(f"{q} [j/N] ").strip().lower() in ("j", "ja", "1", "y")
+    confirm = lambda q: (lambda a: a in ("j", "1") or classify_answer(a) is True)(input(f"{q} [ja/nein] ").strip().lower())
     print(app.assistant.ask([], text, confirm))
 
 
