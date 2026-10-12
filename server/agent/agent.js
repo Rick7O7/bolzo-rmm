@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.5.1';
+const VERSION = '1.5.2';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -486,6 +486,7 @@ function guestConf(type, vmid) {
 
 // IP-Adressen der Gäste: feste aus der Konfiguration, laufende Container per lxc-info,
 // sonst über die Nachbartabelle des Hosts (MAC -> IP)
+const lxcIpCache = new Map(); // vmid -> { at, ips }
 async function guestIps(guests) {
   const neigh = new Map();
   try {
@@ -496,15 +497,36 @@ async function guestIps(guests) {
   await Promise.all(guests.map(async (g) => {
     const ips = new Set(g.conf.staticIps);
     if (g.type === 'lxc' && g.status === 'running') {
-      const r = await exec('lxc-info', ['-n', String(g.vmid), '-iH'], { timeout: 5000 });
-      for (const ip of r.stdout.split(/\s+/)) if (/^\d+\.\d+\.\d+\.\d+$/.test(ip) && !ip.startsWith('127.')) ips.add(ip);
+      let c = lxcIpCache.get(g.vmid);
+      if (!c || Date.now() - c.at > 60000 || c.uptime > g.uptime) {
+        const r = await exec('lxc-info', ['-n', String(g.vmid), '-iH'], { timeout: 5000 });
+        c = { at: Date.now(), uptime: g.uptime, ips: r.stdout.split(/\s+/).filter((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip) && !ip.startsWith('127.')) };
+        lxcIpCache.set(g.vmid, c);
+      }
+      for (const ip of c.ips) ips.add(ip);
     }
     for (const mac of g.conf.macs) if (neigh.has(mac)) ips.add(neigh.get(mac));
     g.ips = [...ips];
   }));
 }
 
-async function pveGuests() {
+// Mehrere offene Fenster/Ansichten fragen oft gleichzeitig: ein pvesh-Aufruf für alle, 4 s gültig.
+// Nach Aktionen (Start, Einstellungen ...) wird der Speicher verworfen, damit die Liste sofort stimmt.
+let guestsCache = null; // { at, promise }
+function pveGuestsCached() {
+  const c = guestsCache;
+  if (c && (!c.at || Date.now() - c.at < 4000)) return c.promise;
+  const entry = { at: 0, promise: null };
+  entry.promise = pveGuestsLoad().then(
+    (r) => { entry.at = Date.now(); return r; },
+    (e) => { if (guestsCache === entry) guestsCache = null; throw e; },
+  );
+  guestsCache = entry;
+  return entry.promise;
+}
+const pveFresh = (fn) => async (p) => { guestsCache = null; try { return await fn(p); } finally { guestsCache = null; } };
+
+async function pveGuestsLoad() {
   if (TEST_PVE) {
     const mac = (interfaces()[0]?.mac || '').toLowerCase();
     return { node: 'test', guests: [
@@ -1280,8 +1302,8 @@ const actions = {
   setServer,
   uninstall,
   'shell.open': openShell,
-  'pve.guests': pveGuests,
-  'pve.power': pvePower,
+  'pve.guests': pveGuestsCached,
+  'pve.power': pveFresh(pvePower),
   'pve.restartAgent': pveRestartAgent,
   'fs.list': fsList,
   'fs.mkdir': fsMkdir,
@@ -1290,10 +1312,10 @@ const actions = {
   'fs.download': fsDownload,
   'fs.upload': fsUpload,
   'pve.config.get': pveConfigGet,
-  'pve.config.set': pveConfigSet,
+  'pve.config.set': pveFresh(pveConfigSet),
   'pve.rrd': pveRrd,
   'pve.snap.list': pveSnapList,
-  'pve.snap': pveSnap,
+  'pve.snap': pveFresh(pveSnap),
   'pve.backup.info': pveBackupInfo,
   'pve.backup.run': pveBackupRun,
   'pve.host': pveHostInfo,

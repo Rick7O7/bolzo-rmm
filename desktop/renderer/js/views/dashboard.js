@@ -4,6 +4,7 @@ import { icon, esc, $, $$, memPct, worstDisk, fmtDuration, fmtAgo, primaryIp, th
 import { lineChart } from '../charts.js';
 import { addClientDialog } from './settings.js';
 import { AUDIT_CATS } from './history.js';
+import { fetchGuests, poll } from '../proxmox.js';
 
 const EV_ICON = { auth: 'key', client: 'monitor', power: 'power', action: 'refresh', script: 'code', shell: 'terminal', settings: 'sliders', system: 'server', connection: 'network' };
 
@@ -135,7 +136,7 @@ export function renderDashboard(root, { go }) {
   async function loadPve() {
     const hosts = [...api.agents.values()].filter((a) => isPveHost(a) && a.online);
     if (!hosts.length) { pveStats = null; return; }
-    const res = await Promise.allSettled(hosts.map((h) => api.get(`/api/agents/${h.id}/pve/guests`)));
+    const res = await Promise.allSettled(hosts.map((h) => fetchGuests(h.id, 50000)));
     const guests = res.flatMap((r) => (r.status === 'fulfilled' ? r.value.guests.filter((g) => !g.template) : []));
     if (res.some((r) => r.status === 'fulfilled')) pveStats = { total: guests.length, running: guests.filter((g) => g.status === 'running').length };
     tiles();
@@ -150,7 +151,7 @@ export function renderDashboard(root, { go }) {
   loadHist();
   loadPve();
   const offAgents = api.on('agents', redraw);
-  const t1 = setInterval(loadHist, 30000);
-  const t2 = setInterval(loadPve, 60000);
-  return () => { offAgents(); offAudit(); clearInterval(t1); clearInterval(t2); chart.destroy?.(); };
+  const stop1 = poll(loadHist, 30000);
+  const stop2 = poll(loadPve, 60000);
+  return () => { offAgents(); offAudit(); stop1(); stop2(); chart.destroy?.(); };
 }

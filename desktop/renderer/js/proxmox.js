@@ -14,6 +14,29 @@ const OPS = {
 };
 
 export const proxmoxHosts = () => [...api.agents.values()].filter((a) => a.info?.proxmox);
+
+// ---------- Gäste-Listen zwischenspeichern ----------
+// Alle Ansichten (Übersicht, Proxmox-Seite, Kacheln, Gast-Seite) teilen sich eine Anfrage je Host.
+// Beim Umschalten wird sofort der letzte Stand gezeigt und im Hintergrund aktualisiert.
+const guestCache = new Map(); // hostId -> { at, data, promise }
+export const cachedGuests = (hostId) => guestCache.get(hostId)?.data || null;
+export function fetchGuests(hostId, maxAge = 0) {
+  let c = guestCache.get(hostId);
+  if (!c) guestCache.set(hostId, (c = { at: 0, data: null, promise: null }));
+  if (c.promise) return c.promise;
+  if (c.data && Date.now() - c.at < maxAge) return Promise.resolve(c.data);
+  c.promise = api.get(`/api/agents/${hostId}/pve/guests`)
+    .then((d) => { c.data = d; c.at = Date.now(); api.emit('pve.guests', hostId); return d; })
+    .finally(() => { c.promise = null; });
+  return c.promise;
+}
+// Regelmäßig aktualisieren, aber nicht, solange das Fenster minimiert/verdeckt ist
+export function poll(fn, ms) {
+  const t = setInterval(() => !document.hidden && fn(), ms);
+  const vis = () => !document.hidden && fn();
+  document.addEventListener('visibilitychange', vis);
+  return () => { clearInterval(t); document.removeEventListener('visibilitychange', vis); };
+}
 const macsOf = (a) => new Set((a.info?.interfaces || []).map((i) => (i.mac || '').toLowerCase()).filter((m) => m && m !== '00:00:00:00:00:00'));
 
 // ---------- Aktionen ----------
@@ -297,7 +320,7 @@ export async function assignDialog(agent) {
     }
     list.innerHTML = `<div class="muted">Lade VMs und Container ...</div>`;
     try {
-      const { guests } = await api.get(`/api/agents/${host.id}/pve/guests`);
+      const { guests } = await fetchGuests(host.id, 10000);
       const match = (g) => g.macs.some((m) => mine.has(m));
       if (!choice || cur?.hostId !== host.id) {
         const auto = guests.filter(match);
@@ -390,28 +413,36 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
   $('[data-ver]', body).textContent = compact || multi || !p ? '' : `Proxmox VE ${p.version || ''} · Knoten ${p.node}`;
   let guests = [];
   let failed = [];
-  let timer = null;
+  let lastHtml = '';
+  const setBody = (html) => {
+    if (html === lastHtml) return; // unverändert: nicht neu zeichnen (sonst gehen Klicks verloren)
+    lastHtml = html;
+    $('tbody', body).innerHTML = html;
+  };
 
-  async function load() {
-    const online = hostIds.filter((id) => hostOf(id)?.online);
-    if (!online.length) {
-      $('tbody', body).innerHTML = `<tr><td colspan="${cols}"><div class="empty">${icon('server')}<h3>${multi ? 'Kein Proxmox-Server online' : 'Host ist offline'}</h3></div></td></tr>`;
-      return;
-    }
-    const res = await Promise.allSettled(online.map((id) => api.get(`/api/agents/${id}/pve/guests`)));
+  function collect(results, online) {
     failed = hostIds.filter((id) => !online.includes(id)).map((id) => `${hostOf(id)?.name || id}: offline`);
     guests = [];
-    res.forEach((r, i) => {
+    results.forEach((r, i) => {
       const h = hostOf(online[i]);
-      if (r.status === 'fulfilled') guests.push(...r.value.guests.map((g) => ({ ...g, hostId: h.id, hostName: h.name })));
-      else failed.push(`${h.name}: ${r.reason.message}`);
+      if (r.status === 'fulfilled' && r.value) guests.push(...r.value.guests.map((g) => ({ ...g, hostId: h.id, hostName: h.name })));
+      else if (r.status === 'rejected') failed.push(`${h.name}: ${r.reason.message}`);
     });
     if (!guests.length && failed.length && !multi) {
-      $('tbody', body).innerHTML = `<tr><td colspan="${cols}"><div class="empty err-text">${esc(failed.join(' · '))}</div></td></tr>`;
+      setBody(`<tr><td colspan="${cols}"><div class="empty err-text">${esc(failed.join(' · '))}</div></td></tr>`);
       return;
     }
     if (multi) guests.sort((a, b) => a.hostName.localeCompare(b.hostName) || a.vmid - b.vmid);
     draw();
+  }
+
+  async function load(force = true) {
+    const online = hostIds.filter((id) => hostOf(id)?.online);
+    if (!online.length) {
+      setBody(`<tr><td colspan="${cols}"><div class="empty">${icon('server')}<h3>${multi ? 'Kein Proxmox-Server online' : 'Host ist offline'}</h3></div></td></tr>`);
+      return;
+    }
+    collect(await Promise.allSettled(online.map((id) => fetchGuests(id, force ? 0 : 10000))), online);
   }
 
   function draw() {
@@ -419,7 +450,7 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     const q = filter.trim().toLowerCase();
     const shown = guests.filter((g) => !g.template && (!q || [g.vmid, g.name, g.hostName, ...(g.ips || []), ...(g.tags || []), api.agents.get(g.agentId)?.name].join(' ').toLowerCase().includes(q)));
     const note = multi && failed.length ? `<tr><td colspan="${cols}" class="pve-failed">${icon('alert', 'sm')}${esc(failed.join(' · '))}</td></tr>` : '';
-    $('tbody', body).innerHTML = note + shown.map((g) => {
+    setBody(note + shown.map((g) => {
       const a = g.agentId && api.agents.get(g.agentId);
       const run = g.status === 'running';
       const osText = a ? osShort(a) : OSTYPES[g.ostype] ?? g.ostype ?? '';
@@ -447,7 +478,7 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
           <button class="btn sm icon-only" data-k="settings" title="Details & Einstellungen">${icon('sliders', 'sm')}</button>
           <button class="btn sm icon-only" data-k="more" title="Weitere Aktionen">⋯</button>
         </td></tr>`;
-    }).join('') || `<tr><td colspan="${cols}"><div class="empty">${q ? 'Kein Gast passt zum Filter' : 'Keine VMs oder Container'}</div></td></tr>`;
+    }).join('') || `<tr><td colspan="${cols}"><div class="empty">${q ? 'Kein Gast passt zum Filter' : 'Keine VMs oder Container'}</div></td></tr>`);
   }
   $('[data-gfilter]', body).addEventListener('input', (e) => { filter = e.target.value; draw(); });
 
@@ -508,9 +539,11 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     toast(`${ok} Client(s) zugeordnet`);
     load();
   };
-  load();
-  timer = setInterval(load, 15000);
-  return () => clearInterval(timer);
+  // Zuerst sofort den gespeicherten Stand zeigen (falls vorhanden), dann frisch laden
+  const online0 = hostIds.filter((id) => hostOf(id)?.online);
+  if (online0.length && online0.every((id) => cachedGuests(id))) collect(online0.map((id) => ({ status: 'fulfilled', value: cachedGuests(id) })), online0);
+  load(false);
+  return poll(load, 15000);
 }
 
 // =====================================================================
@@ -796,7 +829,6 @@ export function renderProxmoxHost(body, hostId, opts = {}) {
       </tbody></table></div>`;
     }).catch((e) => (b.innerHTML = `<div class="card empty err-text">${esc(e.message)}</div>`));
     load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
+    return poll(load, 5000);
   }
 }

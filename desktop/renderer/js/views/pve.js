@@ -2,7 +2,7 @@
 // darunter nur der gewählte Server – kein endloses Scrollen bei mehreren Hosts.
 import { api, LS } from '../api.js';
 import { icon, esc, $, memPct, level } from '../ui.js';
-import { proxmoxHosts, renderProxmoxHost, renderProxmoxTab } from '../proxmox.js';
+import { proxmoxHosts, renderProxmoxHost, renderProxmoxTab, fetchGuests, cachedGuests, poll } from '../proxmox.js';
 
 const pct = (v, threshold) => `<span class="ph-bar"><i class="${level(v, threshold)}" style="width:${Math.min(100, v || 0)}%"></i></span>`;
 
@@ -14,7 +14,14 @@ export function renderPve(root) {
   let sel = LS.get('pve.sel', 'all');
   let shownKey = '';
   let cleanup = null;
+  let cardsHtml = '';
   const counts = {}; // hostId -> { running, total }
+  const countFrom = (id) => {
+    const d = cachedGuests(id);
+    if (!d) return;
+    const real = d.guests.filter((g) => !g.template);
+    counts[id] = { running: real.filter((g) => g.status === 'running').length, total: real.length };
+  };
 
   const hosts = () => proxmoxHosts().sort((a, b) => a.name.localeCompare(b.name));
 
@@ -24,7 +31,7 @@ export function renderPve(root) {
     const t = api.settings.thresholds;
     const totals = Object.values(counts).reduce((s, c) => ({ running: s.running + c.running, total: s.total + c.total }), { running: 0, total: 0 });
     $('[data-sub]', root).textContent = list.length ? `${list.length} Server · ${list.filter((h) => h.online).length} online` : '';
-    $('[data-cards]', root).innerHTML = !list.length ? '' : `
+    const html = !list.length ? '' : `
       <button class="ph-card all ${sel === 'all' ? 'on' : ''}" data-sel="all">
         <div class="ph-top"><span class="ph-ic">${icon('grid', 'sm')}</span><div class="ph-name">Alle Server</div></div>
         <div class="ph-big">${totals.total ? `${totals.running}<small>von ${totals.total} Gästen laufen</small>` : '<small>Gäste werden geladen ...</small>'}</div>
@@ -42,6 +49,8 @@ export function renderPve(root) {
           <div class="ph-foot">${c ? `${c.running} von ${c.total} Gästen laufen` : h.online ? 'Gäste werden geladen ...' : '–'}<span>PVE ${esc((h.info.proxmox.version || '').split('.').slice(0, 2).join('.'))}</span></div>
         </button>`;
       }).join('')}`;
+    // Nur bei Änderungen neu zeichnen – Statusmeldungen kommen alle paar Sekunden und würden Klicks verschlucken
+    if (html !== cardsHtml) $('[data-cards]', root).innerHTML = cardsHtml = html;
   }
 
   function drawContent() {
@@ -61,16 +70,9 @@ export function renderPve(root) {
     cleanup = sel === 'all' ? renderProxmoxTab(box, list.map((h) => h.id)) : renderProxmoxHost(box, sel, { compact: true });
   }
 
-  // Gäste-Anzahl je Server für die Kacheln (leichtgewichtig, jede Minute)
+  // Gäste-Anzahl je Server für die Kacheln: aus dem gemeinsamen Speicher; nur nachladen, was älter als 50 s ist
   async function loadCounts() {
-    await Promise.all(hosts().filter((h) => h.online).map(async (h) => {
-      try {
-        const { guests } = await api.get(`/api/agents/${h.id}/pve/guests`);
-        const real = guests.filter((g) => !g.template);
-        counts[h.id] = { running: real.filter((g) => g.status === 'running').length, total: real.length };
-      } catch {}
-    }));
-    drawCards();
+    await Promise.all(hosts().filter((h) => h.online).map((h) => fetchGuests(h.id, 50000).catch(() => {})));
   }
 
   $('[data-cards]', root).addEventListener('click', (e) => {
@@ -82,10 +84,12 @@ export function renderPve(root) {
     drawContent();
   });
 
+  for (const h of hosts()) countFrom(h.id);
   drawCards();
   drawContent();
   loadCounts();
   const off = api.on('agents', () => { drawCards(); drawContent(); });
-  const timer = setInterval(loadCounts, 60000);
-  return () => { off(); clearInterval(timer); cleanup?.(); };
+  const offG = api.on('pve.guests', (id) => { countFrom(id); drawCards(); });
+  const stopPoll = poll(loadCounts, 60000);
+  return () => { off(); offG(); stopPoll(); cleanup?.(); };
 }

@@ -4,7 +4,7 @@
 import { api } from '../api.js';
 import { icon, esc, el, $, $$, toast, fmtBytes, fmtDuration, tagHtml, osShort } from '../ui.js';
 import { lineChart } from '../charts.js';
-import { pveCall, pvePower, openConsole, kind, OSTYPES, statusBadge, miniBar, renderGuestSnapshots, renderGuestBackups } from '../proxmox.js';
+import { pveCall, pvePower, openConsole, kind, OSTYPES, statusBadge, miniBar, renderGuestSnapshots, renderGuestBackups, fetchGuests, poll } from '../proxmox.js';
 
 const TABS = [
   ['overview', 'Übersicht', 'activity'], ['network', 'Netzwerk', 'network'], ['hardware', 'Hardware', 'cpu'],
@@ -26,7 +26,6 @@ export function renderGuest(root, { go, params }) {
   let bridges = null;
   let chart = null;
   let timeframe = 'hour';
-  let timer = null;
 
   root.innerHTML = `<div class="gp">
     <button class="crumb" data-back style="margin-bottom:10px">${icon('back', 'sm')}Proxmox</button>
@@ -41,7 +40,7 @@ export function renderGuest(root, { go, params }) {
 
   // ---------- Laden ----------
   async function loadStatus() {
-    const { guests } = await api.get(`/api/agents/${hostId}/pve/guests`);
+    const { guests } = await fetchGuests(hostId);
     status = guests.find((x) => x.type === type && x.vmid === vmid) || null;
     if (!status) throw new Error(`${kind(type)} ${vmid} gibt es auf ${host()?.name || 'diesem Host'} nicht (mehr)`);
   }
@@ -357,6 +356,6 @@ export function renderGuest(root, { go, params }) {
   });
 
   loadAll();
-  timer = setInterval(refresh, 10000);
-  return () => { clearInterval(timer); chart?.destroy?.(); };
+  const stopPoll = poll(refresh, 10000);
+  return () => { stopPoll(); chart?.destroy?.(); };
 }
