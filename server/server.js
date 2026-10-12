@@ -45,6 +45,9 @@ if (!ADMIN_PASSWORD) {
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest();
 const sha256hex = (s) => sha256(s).toString('hex');
 const safeEqual = (a, b) => crypto.timingSafeEqual(sha256(a), sha256(b));
+// Anmeldungen gelten nur, solange das Admin-Passwort gleich bleibt: Passwort ändern = überall abgemeldet
+const PW_MARK = sha256hex(`bolzo-rmm-session:${ADMIN_PASSWORD}`).slice(0, 16);
+for (const s of Object.values(store.data.sessions)) s.pw ??= PW_MARK; // bestehende Sitzungen übernehmen
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ---------------------------------------------------------------------------
@@ -151,17 +154,21 @@ app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Bolzo-Device');
   res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'no-referrer');
+  if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-function validSession(token) {
-  if (!token) return null;
-  const s = store.data.sessions[sha256hex(token)];
-  return s && s.expires > Date.now() ? s : null;
+function sessionByKey(key) {
+  const s = key && store.data.sessions[key];
+  return s && s.expires > Date.now() && s.pw === PW_MARK ? s : null;
 }
+const validSession = (token) => (token ? sessionByKey(sha256hex(token)) : null);
 
 // API-Zugänge (z.B. für die Sprachsteuerung) dürfen nur, was ihre Rechte (scopes) erlauben:
 //   status    – Clients und ihren Zustand lesen
@@ -241,15 +248,18 @@ function auditAgent(req, a, cat, action, extra = {}) {
 
 audit.onEntry((entry) => broadcast({ type: 'audit', entry }));
 
-app.get('/health', (req, res) => res.json({ ok: true, id: store.data.serverId, agents: Object.keys(store.data.agents).length, online: conns.size }));
+app.get('/health', (req, res) => res.json({ ok: true, id: store.data.serverId }));
 
 // ---- Login ----------------------------------------------------------------
 const loginFails = new Map(); // ip -> [timestamps]
+let allFails = []; // alle Fehlversuche – bremst auch Angriffe von vielen Adressen aus
 app.post('/api/login', wrap(async (req, res) => {
   const ip = req.ip;
-  const recent = (loginFails.get(ip) || []).filter((t) => t > Date.now() - 10 * 60e3);
+  const since = Date.now() - 10 * 60e3;
+  const recent = (loginFails.get(ip) || []).filter((t) => t > since);
+  allFails = allFails.filter((t) => t > since);
   const device = String(req.body?.device || '').trim().slice(0, 60);
-  if (recent.length >= 5) {
+  if (recent.length >= 5 || allFails.length >= 30) {
     audit.add({ cat: 'auth', action: 'Anmeldung gesperrt', actor: device || 'Unbekannt', ip: ipOf(req), detail: 'Zu viele Fehlversuche', ok: false });
     return res.status(429).json({ error: 'Zu viele Fehlversuche – bitte 10 Minuten warten' });
   }
@@ -257,6 +267,7 @@ app.post('/api/login', wrap(async (req, res) => {
   if (!password || !safeEqual(password, ADMIN_PASSWORD)) {
     recent.push(Date.now());
     loginFails.set(ip, recent);
+    allFails.push(Date.now());
     audit.add({ cat: 'auth', action: 'Anmeldung fehlgeschlagen', actor: device || 'Unbekannt', ip: ipOf(req), detail: 'Falsches Passwort', ok: false });
     await new Promise((r) => setTimeout(r, 600));
     return res.status(401).json({ error: 'Falsches Passwort' });
@@ -265,24 +276,68 @@ app.post('/api/login', wrap(async (req, res) => {
   const token = crypto.randomBytes(32).toString('base64url');
   const now = Date.now();
   for (const [k, s] of Object.entries(store.data.sessions)) if (s.expires < now) delete store.data.sessions[k];
-  req.session = { created: now, expires: now + SESSION_DAYS * 864e5, device: device || undefined, ip: ipOf(req) };
+  req.session = { created: now, expires: now + SESSION_DAYS * 864e5, device: device || undefined, ip: ipOf(req), pw: PW_MARK };
   store.data.sessions[sha256hex(token)] = req.session;
   store.save();
   auditReq(req, 'auth', 'Anmeldung');
   res.json({ token });
 }));
 
+function closeSessionSockets(keep) {
+  for (const ws of admins) if (ws.sessionKey !== keep) ws.close(4001, 'abgemeldet');
+}
+
 app.post('/api/logout', requireAdmin, (req, res) => {
-  const token = req.get('authorization').replace(/^Bearer\s+/i, '');
-  delete store.data.sessions[sha256hex(token)];
+  const key = sha256hex(bearer(req));
+  delete store.data.sessions[key];
   store.save();
+  for (const ws of admins) if (ws.sessionKey === key) ws.close(4001, 'abgemeldet');
   auditReq(req, 'auth', 'Abmeldung');
   res.json({ ok: true });
 });
 
+// Alle anderen Anmeldungen beenden (z.B. wenn ein Laptop mit der App verloren ging)
+app.post('/api/sessions/revoke', requireAdmin, (req, res) => {
+  const keep = sha256hex(bearer(req));
+  const n = Object.keys(store.data.sessions).filter((k) => k !== keep).length;
+  for (const k of Object.keys(store.data.sessions)) if (k !== keep) delete store.data.sessions[k];
+  store.save();
+  closeSessionSockets(keep);
+  auditReq(req, 'auth', 'Andere Anmeldungen beendet', { detail: `${n} Sitzung${n === 1 ? '' : 'en'}` });
+  res.json({ ok: true, revoked: n });
+});
+
+// Live-Verbindungen (WebSocket) melden sich mit einem kurzlebigen Einmal-Ticket an statt mit der
+// Sitzung selbst – so landet die 30 Tage gültige Sitzung nie in Adresszeilen und Proxy-Logs.
+const wsTickets = new Map(); // ticket -> { key, exp }
+app.post('/api/ws-ticket', requireAdmin, (req, res) => {
+  const now = Date.now();
+  for (const [k, v] of wsTickets) if (v.exp < now) wsTickets.delete(k);
+  const ticket = crypto.randomBytes(24).toString('base64url');
+  wsTickets.set(ticket, { key: sha256hex(bearer(req)), exp: now + 60e3 });
+  res.json({ ticket });
+});
+
+function wsAuth(url) {
+  const ticket = url.searchParams.get('ticket');
+  if (ticket) {
+    const t = wsTickets.get(ticket);
+    wsTickets.delete(ticket); // nur einmal gültig
+    const session = t && t.exp > Date.now() ? sessionByKey(t.key) : null;
+    return session ? { session, key: t.key } : null;
+  }
+  // Apps bis 1.13 schicken noch die Sitzung selbst – entfernen, sobald alle Apps aktualisiert sind
+  const token = url.searchParams.get('token');
+  const session = validSession(token);
+  return session ? { session, key: sha256hex(token) } : null;
+}
+
 // ---- Clients --------------------------------------------------------------
+// API-Zugänge (z.B. Sprachsteuerung) bekommen die Notizen nicht – darin stehen oft Zugangsdaten
+const forCaller = (req, s) => (req.apiToken ? { ...s, notes: undefined } : s);
+
 app.get('/api/agents', requireScope('status'), (req, res) => {
-  res.json(Object.values(store.data.agents).map((a) => summarize(a, true)));
+  res.json(Object.values(store.data.agents).map((a) => forCaller(req, summarize(a, true))));
 });
 
 function getAgent(req) {
@@ -293,7 +348,7 @@ function getAgent(req) {
 
 app.get('/api/agents/:id', requireScope('status'), wrap(async (req, res) => {
   const a = getAgent(req);
-  res.json({ ...summarize(a), history: live.get(a.id)?.history || [] });
+  res.json(forCaller(req, { ...summarize(a), history: live.get(a.id)?.history || [] }));
 }));
 
 // Durchschnittliche Auslastung aller Online-Clients je Minute (letzte Stunde) – fürs Dashboard
@@ -731,12 +786,15 @@ const FS_CALLS = {
   rename: { action: 'fs.rename', audit: 'Datei umbenannt', detail: (p) => `${p.from} → ${p.name}` },
   delete: { action: 'fs.delete', audit: 'Dateien gelöscht', detail: (p) => (p.paths || []).join(', ').slice(0, 500) },
 };
-const dlKeys = new Map(); // key -> { agentId, exp }
-function dlKeyFor(agentId) {
+// Ein Download-Schlüssel gilt nur für Dateien direkt in dem Ordner, der gerade angezeigt wurde
+const dlKeys = new Map(); // key -> { agentId, dir, exp }
+const trimSep = (p) => String(p || '').replace(/[\\/]+$/, '');
+const parentOf = (p) => trimSep(p).replace(/[\\/][^\\/]*$/, '');
+function dlKeyFor(agentId, dir) {
   const now = Date.now();
   for (const [k, v] of dlKeys) if (v.exp < now) dlKeys.delete(k);
   const key = crypto.randomBytes(18).toString('base64url');
-  dlKeys.set(key, { agentId, exp: now + 30 * 60e3 });
+  dlKeys.set(key, { agentId, dir: trimSep(dir), exp: now + 30 * 60e3 });
   return key;
 }
 
@@ -748,7 +806,7 @@ app.post('/api/agents/:id/files', requireAdmin, wrap(async (req, res) => {
   try {
     const r = await agentRequest(a.id, def.action, params, 60000);
     if (def.audit) auditAgent(req, a, 'action', def.audit, { detail: def.detail(params) });
-    res.json(op === 'list' ? { ...r, dlKey: dlKeyFor(a.id) } : r);
+    res.json(op === 'list' ? { ...r, dlKey: dlKeyFor(a.id, r.path) } : r);
   } catch (e) {
     if (def.audit) auditAgent(req, a, 'action', def.audit, { detail: def.detail(params), ok: false, result: e.message });
     throw e;
@@ -781,6 +839,7 @@ app.get('/api/files/dl', wrap(async (req, res) => {
   const a = store.data.agents[agentId];
   if (!a || !conns.has(agentId)) throw httpError(409, 'Client ist offline');
   const filePath = String(req.query.path || '');
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(filePath) || parentOf(filePath) !== k.dir) throw httpError(403, 'Dieser Download-Link gilt nur für den angezeigten Ordner');
   const sid = crypto.randomUUID();
   let ready = false;
   let headersSet = false;
@@ -1093,8 +1152,25 @@ function lanUrl() {
 // Clients im Heimnetz kommen oft nicht über die öffentliche Adresse herein (kein
 // Hairpin-NAT im Router). Deshalb gibt es neben der öffentlichen Adresse immer
 // auch die LAN-Adresse des Servers – und ggf. die Adresse, mit der die App verbunden ist.
+// Installationsschlüssel stehen in den Install-Befehlen und damit oft in der Shell-Historie der
+// Clients. Deshalb gilt jeder nur 24 Stunden; die App zeigt immer einen frischen an.
+const ENROLL_TTL = 24 * 3600e3;
+const newEnrollKey = () => ({ key: crypto.randomBytes(18).toString('base64url'), createdAt: Date.now() });
+function currentEnrollKey() {
+  const now = Date.now();
+  store.data.enrollKeys = store.data.enrollKeys.filter((k) => now - k.createdAt < ENROLL_TTL);
+  let k = store.data.enrollKeys.at(-1);
+  if (!k || now - k.createdAt > 3600e3) {
+    store.data.enrollKeys.push((k = newEnrollKey()));
+    store.save();
+  }
+  return k;
+}
+const validEnrollKey = (key) => !!key && store.data.enrollKeys.some((k) => Date.now() - k.createdAt < ENROLL_TTL && safeEqual(key, k.key));
+
 function enrollInfo(req) {
-  const key = store.data.enrollKey;
+  const ek = currentEnrollKey();
+  const key = ek.key;
   const host = (u) => u.replace(/^https?:\/\//, '');
   const primary = PUBLIC_URL || requestUrl(req);
   const candidates = [
@@ -1108,7 +1184,7 @@ function enrollInfo(req) {
     variants.push({ label: typeof label === 'function' ? label(url) : label, ...installCommands(url, key) });
   }
   if (variants.length === 1) variants[0].label = '';
-  return { serverUrl: variants[0].url, key, linux: variants[0].linux, windows: variants[0].windows, variants };
+  return { serverUrl: variants[0].url, key, keyExpires: ek.createdAt + ENROLL_TTL, linux: variants[0].linux, windows: variants[0].windows, variants };
 }
 
 app.get('/api/enroll', requireAdmin, (req, res) => res.json(enrollInfo(req)));
@@ -1194,7 +1270,7 @@ app.post('/api/agents/migrate', requireAdmin, wrap(async (req, res) => {
 }));
 
 app.post('/api/enroll/rotate', requireAdmin, (req, res) => {
-  store.data.enrollKey = crypto.randomBytes(18).toString('base64url');
+  store.data.enrollKeys = [newEnrollKey()]; // alle bisherigen Schlüssel sofort ungültig
   store.save();
   auditReq(req, 'settings', 'Installationsschlüssel erneuert');
   res.json(enrollInfo(req));
@@ -1203,7 +1279,7 @@ app.post('/api/enroll/rotate', requireAdmin, (req, res) => {
 // ---- Öffentlich: Install-Skripte, Agent-Download, Enrollment -------------
 function checkKey(req) {
   const key = String(req.query.key || req.body?.key || '');
-  if (!key || !safeEqual(key, store.data.enrollKey)) {
+  if (!validEnrollKey(key)) {
     audit.add({ cat: 'auth', action: 'Ungültiger Installationsschlüssel', actor: 'Installationsskript', ip: ipOf(req), detail: req.path, ok: false });
     throw httpError(403, 'Ungültiger Installationsschlüssel');
   }
@@ -1213,7 +1289,7 @@ function checkKey(req) {
 function renderTemplate(name, req) {
   return fs.readFileSync(path.join(__dirname, 'templates', name), 'utf8')
     .replaceAll('__SERVER_URL__', requestUrl(req))
-    .replaceAll('__ENROLL_KEY__', store.data.enrollKey);
+    .replaceAll('__ENROLL_KEY__', String(req.query.key)); // checkKey hat ihn geprüft
 }
 
 app.get('/install/linux.sh', wrap(async (req, res) => {
@@ -1237,6 +1313,9 @@ app.post('/agent/enroll', wrap(async (req, res) => {
   if (!hostname) throw httpError(400, 'hostname fehlt');
   // Neuinstallation auf derselben Maschine übernimmt den bestehenden Eintrag.
   let a = machineId && Object.values(store.data.agents).find((x) => x.machineId === machineId);
+  // Läuft der bisherige Agent noch, wird der Eintrag nie übernommen – sonst könnte jemand mit
+  // Installationsschlüssel und fremder Maschinen-ID einen Client "kapern" (z.B. Terminal-Eingaben abgreifen)
+  if (a && conns.has(a.id)) a = null;
   const known = !!a;
   if (!a) {
     a = { id: crypto.randomUUID(), createdAt: Date.now(), tags: [], notes: '' };
@@ -1273,19 +1352,27 @@ const wssTunnel = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://x');
+  let auth = null;
   if (url.pathname === '/ws/agent') {
     wssAgent.handleUpgrade(req, socket, head, (ws) => wssAgent.emit('connection', ws, req));
   } else if (url.pathname === '/ws/tunnel') {
     wssTunnel.handleUpgrade(req, socket, head, (ws) => tunnelAgentSide(ws));
-  } else if ((url.pathname === '/ws/console' || url.pathname === '/ws/stream') && validSession(url.searchParams.get('token')) && tunnels.get(url.searchParams.get('sid'))?.adminWs === null) {
+  } else if (['/ws/console', '/ws/stream', '/ws/admin'].includes(url.pathname) && (auth = wsAuth(url))) {
+    if (url.pathname === '/ws/admin') {
+      noteDevice(auth.session, url.searchParams.get('device'));
+      wssAdmin.handleUpgrade(req, socket, head, (ws) => {
+        ws.session = auth.session;
+        ws.sessionKey = auth.key;
+        wssAdmin.emit('connection', ws, req);
+      });
+      return;
+    }
     const sid = url.searchParams.get('sid');
+    if (tunnels.get(sid)?.adminWs !== null) {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      return socket.destroy();
+    }
     wssTunnel.handleUpgrade(req, socket, head, (ws) => tunnelAdminSide(ws, sid));
-  } else if (url.pathname === '/ws/admin' && validSession(url.searchParams.get('token'))) {
-    const session = noteDevice(validSession(url.searchParams.get('token')), url.searchParams.get('device'));
-    wssAdmin.handleUpgrade(req, socket, head, (ws) => {
-      ws.session = session;
-      wssAdmin.emit('connection', ws, req);
-    });
   } else {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
@@ -1342,9 +1429,20 @@ function tunnelAdminSide(ws, sid) {
   ws.on('error', () => {});
 }
 
+// Wie Express' "trust proxy": Weitergeleitete Adressen nur von Proxys im eigenen Netz annehmen und
+// von rechts lesen – der linke Teil von X-Forwarded-For kann vom Absender gefälscht sein.
+const isProxyAddr = (ip) => /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|f[cd][0-9a-f]{2}:)/i.test(ip);
 function clientIp(req) {
-  const fwd = req.headers['x-forwarded-for'];
-  return (fwd ? fwd.split(',')[0] : req.socket.remoteAddress || '').trim().replace(/^::ffff:/, '');
+  const remote = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim().replace(/^::ffff:/, '')).filter(Boolean);
+  if (!fwd.length || !isProxyAddr(remote)) return remote;
+  for (let i = fwd.length - 1; i > 0; i--) if (!isProxyAddr(fwd[i])) return fwd[i];
+  return fwd[0];
+}
+
+// Was ein Agent über sich meldet, wird gespeichert und an die App verteilt – Größe begrenzen
+function bounded(v, maxChars) {
+  try { return v && typeof v === 'object' && JSON.stringify(v).length <= maxChars ? v : undefined; } catch { return undefined; }
 }
 
 wssAgent.on('connection', (ws, req) => {
@@ -1370,7 +1468,14 @@ wssAgent.on('connection', (ws, req) => {
       const old = conns.get(agentId);
       if (old) old.ws.close(4002, 'replaced');
       conns.set(agentId, { ws, pending: new Map() });
-      Object.assign(a, { info: msg.info, version: msg.version, agentHash: msg.hash || '', serverUrl: msg.serverUrl || '', publicIp: clientIp(req), lastSeen: Date.now() });
+      Object.assign(a, {
+        info: bounded(msg.info, 256e3) || a.info || {},
+        version: String(msg.version || '').slice(0, 20),
+        agentHash: String(msg.hash || '').slice(0, 64),
+        serverUrl: String(msg.serverUrl || '').slice(0, 300),
+        publicIp: clientIp(req),
+        lastSeen: Date.now(),
+      });
       store.save();
       sendJson(ws, { type: 'welcome' });
       if (store.data.settings.autoUpdateAgents && agentOutdated(a) && Date.now() - (a.lastAutoUpdate || 0) > 10 * 60e3) {
@@ -1418,6 +1523,7 @@ function handleAgentMessage(agentId, msg) {
   if (!a) return;
   switch (msg.type) {
     case 'metrics': {
+      if (!bounded(msg.metrics, 64e3) || typeof msg.metrics.cpu !== 'number') return;
       const l = liveOf(agentId);
       l.metrics = msg.metrics;
       const memPct = msg.metrics.mem?.total ? (100 * msg.metrics.mem.used) / msg.metrics.mem.total : 0;
@@ -1428,6 +1534,7 @@ function handleAgentMessage(agentId, msg) {
       break;
     }
     case 'info':
+      if (!bounded(msg.info, 256e3)) return;
       a.info = msg.info;
       store.save();
       broadcastAgent(agentId);
@@ -1529,6 +1636,10 @@ setInterval(() => {
     }
   }
   for (const c of conns.values()) sendJson(c.ws, { type: 'ping' });
+  for (const ws of admins) if (ws.sessionKey && !sessionByKey(ws.sessionKey)) ws.close(4001, 'Sitzung abgelaufen');
+  // Fehlversuche beim Anmelden nicht ewig im Speicher halten
+  const since = Date.now() - 10 * 60e3;
+  for (const [ip, list] of loginFails) if (!list.some((t) => t > since)) loginFails.delete(ip);
 }, 30000);
 
 // lastSeen regelmäßig sichern

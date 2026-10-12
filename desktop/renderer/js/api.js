@@ -81,11 +81,36 @@ class Api extends EventTarget {
     this.emit('logout');
   }
 
+  // Anmeldung für WebSockets: kurzlebiges Einmal-Ticket statt der Sitzung selbst – so steht die
+  // 30 Tage gültige Sitzung nie in einer Adresse (Proxy-Logs). Ältere Server kennen das noch nicht.
+  async wsAuth() {
+    try {
+      const { ticket } = await this.post('/api/ws-ticket');
+      return `ticket=${encodeURIComponent(ticket)}`;
+    } catch (e) {
+      if (/\b404\b/.test(e.message)) return `token=${encodeURIComponent(this.token)}`;
+      throw e;
+    }
+  }
+
+  async wsUrl(path, params = {}) {
+    const q = Object.entries(params).map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join('');
+    return `${this.server.replace(/^http/, 'ws')}${path}?${await this.wsAuth()}${q}`;
+  }
+
   // ---------- Live-Verbindung ----------
-  connect() {
+  async connect() {
     this.disconnect();
-    const url = this.server.replace(/^http/, 'ws') + '/ws/admin?token=' + encodeURIComponent(this.token)
-      + (this.device ? '&device=' + encodeURIComponent(this.device) : '');
+    const gen = this._gen;
+    let url;
+    try {
+      url = await this.wsUrl('/ws/admin', this.device ? { device: this.device } : {});
+    } catch {
+      if (gen !== this._gen || !this.token) return;
+      this._retry = setTimeout(() => this.token && this.connect(), 3000); // Server (noch) nicht erreichbar
+      return;
+    }
+    if (gen !== this._gen || !this.token) return; // inzwischen abgemeldet oder neu verbunden
     const ws = new WebSocket(url);
     this.ws = ws;
     ws.onopen = () => {
@@ -106,6 +131,7 @@ class Api extends EventTarget {
   }
 
   disconnect() {
+    this._gen = (this._gen || 0) + 1;
     clearTimeout(this._retry);
     if (this.ws) {
       const ws = this.ws;

@@ -36,7 +36,7 @@ async function uploadFile(agentId, dir, file, name = file.name) {
   $('[data-cancel]', ui.row).onclick = () => { cancelled = true; try { ws?.close(); } catch {} };
   try {
     const { sid } = await api.post(`/api/agents/${agentId}/files/upload`, { dir, name, size: file.size });
-    ws = new WebSocket(`${api.server.replace(/^http/, 'ws')}/ws/stream?token=${encodeURIComponent(api.token)}&sid=${encodeURIComponent(sid)}`);
+    ws = new WebSocket(await api.wsUrl('/ws/stream', { sid }));
     ws.binaryType = 'arraybuffer';
     const result = new Promise((resolve, reject) => {
       ws.onmessage = (e) => { if (typeof e.data === 'string') { try { resolve(JSON.parse(e.data)); } catch { resolve({}); } } };

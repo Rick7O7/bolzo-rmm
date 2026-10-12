@@ -179,11 +179,27 @@ diktierte Befehle gibt es am Telefon nie.
 
 - Wer das Admin-Passwort hat, hat **Root/SYSTEM-Zugriff auf alle Clients**. Starkes Passwort verwenden.
 - Den Server nicht ohne HTTPS ins Internet stellen.
-- Der Installationsschlüssel erlaubt nur das Registrieren neuer Clients. Er kann jederzeit in den
-  Einstellungen erneuert werden; installierte Agents bleiben davon unberührt.
+- Clients im Heimnetz verbinden sich oft per `http://` direkt mit dem Server – dann laufen Befehle
+  und Terminal unverschlüsselt durchs LAN. Besser: im Router/DNS (z.B. OPNsense → Unbound → Host
+  Overrides) `rmm.bolzo.net` intern auf den nginx zeigen lassen und die Agents per
+  „Verbindung der Agents" auf `https://` umziehen.
+- Der Installationsschlüssel erlaubt nur das Registrieren neuer Clients und gilt 24 Stunden (die App
+  zeigt immer einen frischen). „Neuen Schlüssel erzeugen" macht alle bisherigen sofort ungültig;
+  installierte Agents bleiben davon unberührt. Ein laufender Client kann nicht per Neuinstallation
+  „übernommen" werden.
 - Jeder Agent hat ein eigenes Geheimnis (auf dem Server nur als Hash gespeichert). Ein in der App
   gelöschter Client kann sich nicht mehr verbinden.
-- 5 falsche Login-Versuche sperren die IP für 10 Minuten.
+- Anmeldungen gelten 30 Tage, enden aber sofort, wenn sich das Admin-Passwort ändert. „Andere Geräte
+  abmelden" (Einstellungen → Server) beendet alle anderen Anmeldungen.
+- Live-Verbindungen melden sich mit einem 60 Sekunden gültigen Einmal-Ticket an; Download-Links gelten
+  30 Minuten und nur für Dateien des gerade angezeigten Ordners. Die nginx-Vorlage protokolliert
+  Adressen ohne Query-String, damit keine Schlüssel in Logs landen.
+- 5 falsche Login-Versuche sperren die IP für 10 Minuten, 30 Fehlversuche insgesamt sperren die
+  Anmeldung für alle für 10 Minuten.
+- API-Zugänge (Sprachsteuerung) sehen die Notizen der Clients nicht.
+- Sprachsteuerung: SIP-Nachrichten werden nur von der FRITZ!Box angenommen. Falsche PINs sperren
+  nach 6 Versuchen pro Stunde bzw. 15 pro Tag alle Anrufe (bleibt auch über Neustarts erhalten).
+  PIN mit mindestens 6 Ziffern verwenden.
 
 ## Bekannte Grenzen
 

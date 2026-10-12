@@ -24,6 +24,7 @@ function installHtml(info) {
   return `
     ${variants.length > 1 ? `<div class="hint" style="font-size:12.5px;color:var(--text-2)">Clients im selben Netz wie der Server brauchen meist die <b>Heimnetz</b>-Variante – viele Router lassen interne Geräte nicht über die eigene öffentliche Adresse herein. Geräte außerhalb nehmen <b>Von außen</b>.</div>` : ''}
     ${variants.map(block).join('')}
+    ${info.keyExpires ? `<div class="hint" style="font-size:12.5px;color:var(--muted)">${icon('key', 'sm')} Aus Sicherheitsgründen gelten die Befehle nur bis ${esc(new Date(info.keyExpires).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }))} Uhr – danach hier einfach neu kopieren.</div>` : ''}
     <div class="hint" style="font-size:12.5px;color:var(--muted)">Der Client erscheint nach etwa 10–30 Sekunden automatisch im Dashboard. Das Skript lädt eine eigene Node.js-Laufzeit (~30 MB) nach <span class="mono">/opt/bolzo-rmm-agent</span> bzw. <span class="mono">C:\\Program Files\\BolzoRMMAgent</span>.</div>`;
 }
 
@@ -80,8 +81,12 @@ export function renderSettings(root, { go }) {
         <div class="card-pad kv">
           <div class="k">Adresse</div><div class="v mono">${esc(api.server)}</div>
           <div class="k">Verbindung</div><div class="v" data-conn></div>
+          <div class="k">Verschlüsselung</div><div class="v">${api.server.startsWith('https:') ? 'HTTPS' : '<span style="color:var(--warning)">keine (HTTP) – Passwort und Sitzung gehen lesbar durchs Netz. Nur im eigenen Heimnetz so verbinden.</span>'}</div>
         </div>
-        <div class="card-pad" style="border-top:1px solid var(--border)"><button class="btn danger" data-logout>${icon('logout', 'sm')}Abmelden</button></div>
+        <div class="card-pad row" style="border-top:1px solid var(--border);gap:8px">
+          <button class="btn danger" data-logout>${icon('logout', 'sm')}Abmelden</button>
+          <button class="btn" data-revoke title="Meldet alle anderen PCs ab, auf denen die App angemeldet ist – z.B. wenn ein Laptop verloren ging">${icon('key', 'sm')}Andere Geräte abmelden</button>
+        </div>
       </div>
     </div>`;
 
@@ -113,6 +118,13 @@ export function renderSettings(root, { go }) {
   const drawConn = () => ($('[data-conn]', root).innerHTML = api.connected ? '<span class="status"><span class="dot online"></span>Verbunden</span>' : '<span class="status"><span class="dot offline"></span>Getrennt – verbinde neu ...</span>');
   drawConn();
   $('[data-logout]', root).onclick = () => api.logout();
+  $('[data-revoke]', root).onclick = async () => {
+    if (!(await confirmDialog({ title: 'Andere Geräte abmelden?', text: 'Alle anderen PCs, auf denen die App angemeldet ist, müssen sich danach neu mit dem Passwort anmelden. Dieser PC bleibt angemeldet.', okText: 'Abmelden', danger: true }))) return;
+    try {
+      const r = await api.post('/api/sessions/revoke');
+      toast(r.revoked ? `${r.revoked} andere Anmeldung${r.revoked === 1 ? '' : 'en'} beendet` : 'Keine anderen Anmeldungen');
+    } catch (e) { toast(e.message, 'err'); }
+  };
   const offUpd = renderUpdateCard($('[data-updates]', root));
   const offConn = api.on('conn', drawConn);
   const offMig = renderMigrateCard($('[data-migrate-card]', root));

@@ -75,7 +75,9 @@ class Store {
     data.settings ??= {};
     data.settings.thresholds ??= { cpu: 90, mem: 90, disk: 90 };
     data.settings.autoUpdateAgents ??= true;
-    data.enrollKey ??= crypto.randomBytes(18).toString('base64url');
+    // Installationsschlüssel (je 24 h gültig, siehe server.js); früher gab es nur einen dauerhaften
+    data.enrollKeys ??= data.enrollKey ? [{ key: data.enrollKey, createdAt: Date.now() }] : [];
+    delete data.enrollKey;
     data.serverId ??= crypto.randomUUID(); // Agents prüfen beim Adresswechsel, dass es derselbe Server ist
     if (!data.scripts) {
       data.scripts = DEFAULT_SCRIPTS.map((s) => ({

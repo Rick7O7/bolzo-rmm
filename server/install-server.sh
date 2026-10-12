@@ -64,6 +64,25 @@ chown -R bolzo-rmm:bolzo-rmm "$DATA"
 chown root:bolzo-rmm "$CONF/bolzo-rmm.env"
 chmod 640 "$CONF/bolzo-rmm.env"
 
+# Zusätzliche Abschottung des Dienstes. Manche Container (LXC) unterstützen nicht alles –
+# startet der Dienst damit nicht, wird unten automatisch ohne diese Zeilen neu gestartet.
+HARDEN='UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK'
+
+write_unit() {
 cat > /etc/systemd/system/bolzo-rmm.service <<EOF
 [Unit]
 Description=BOLZO RMM Server
@@ -83,10 +102,13 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=$DATA
+$1
 
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+write_unit "$HARDEN"
 
 # Selbst-Update: Die App legt $DATA/update-request an (der Dienst darf nur dort schreiben).
 # Diese Path-Unit startet dann als root den Installer von GitHub.
@@ -121,7 +143,14 @@ systemctl daemon-reload
 systemctl enable --now bolzo-rmm-update.path >/dev/null 2>&1
 systemctl enable bolzo-rmm >/dev/null 2>&1
 systemctl restart bolzo-rmm
-sleep 2
+sleep 3
+if ! systemctl is-active --quiet bolzo-rmm; then
+  info "Dienst startet mit voller Abschottung nicht – nehme die Grundeinstellungen."
+  write_unit ""
+  systemctl daemon-reload
+  systemctl restart bolzo-rmm
+  sleep 3
+fi
 systemctl is-active --quiet bolzo-rmm || { journalctl -u bolzo-rmm -n 30 --no-pager; fail "Server startet nicht."; }
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')

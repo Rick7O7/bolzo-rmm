@@ -2,6 +2,7 @@
 const { app, BrowserWindow, shell, Menu, nativeTheme, ipcMain } = require('electron');
 const path = require('path');
 const os = require('os');
+const { pathToFileURL } = require('url');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
@@ -31,9 +32,11 @@ function makeWindow(opts, file, query) {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
+  const own = pathToFileURL(path.join(__dirname, 'renderer') + path.sep).href;
   w.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file:')) e.preventDefault();
+    if (!url.startsWith(own)) e.preventDefault();
   });
+  w.webContents.on('will-attach-webview', (e) => e.preventDefault());
   w.webContents.on('before-input-event', (e, input) => {
     if (input.type === 'keyDown' && (input.key === 'F12' || (input.control && input.shift && input.key === 'I'))) {
       w.webContents.toggleDevTools();

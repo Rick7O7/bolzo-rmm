@@ -88,7 +88,12 @@ info "Spracherkennungs-Modell '${WHISPER_MODEL:-small}' vorab laden ..."
 "$APP/venv/bin/python" -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL:-small}', device='cpu', compute_type='int8', download_root='$APP/models')" \
   || echo "    (wird beim ersten Start geladen)"
 
-chown -R bolzo-voice:bolzo-voice "$APP"
+# Programm und Python-Umgebung gehören root – der Dienst kann seinen eigenen Code nicht verändern.
+# Schreiben darf er nur Modelle, den Ansagen-Cache und die PIN-Sperrliste.
+mkdir -p "$APP/cache" "$APP/state"
+chown -R root:root "$APP"
+chown -R bolzo-voice:bolzo-voice "$APP/models" "$APP/cache" "$APP/state"
+chmod 700 "$APP/state"
 
 cat > /etc/systemd/system/bolzo-voice.service <<EOF
 [Unit]
@@ -112,7 +117,10 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$APP
+ReadWritePaths=$APP/models $APP/cache $APP/state
+UMask=0077
+RestrictSUIDSGID=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

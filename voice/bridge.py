@@ -92,6 +92,7 @@ def load_config():
         "piper_bin": e("PIPER_BIN", "/opt/bolzo-voice/piper/piper"),
         "piper_voice": e("PIPER_VOICE", "/opt/bolzo-voice/voices/de_DE-thorsten-medium.onnx"),
         "tts_cache": e("TTS_CACHE", "/opt/bolzo-voice/cache"),
+        "lockout_file": e("LOCKOUT_FILE", "/opt/bolzo-voice/state/pin-fails.json"),
     }
     return cfg
 
@@ -747,25 +748,41 @@ class Hangup(Exception):
 
 
 class Lockout:
-    """Sperrt nach zu vielen falschen PINs alle Anrufe für eine Stunde."""
+    """Sperrt nach zu vielen falschen PINs alle Anrufe: 6 Fehlversuche pro Stunde oder 15 pro Tag.
+    Die Fehlversuche werden gespeichert, damit ein Neustart (z.B. nach einem FRITZ!Box-Neustart)
+    die Sperre nicht aufhebt."""
 
-    def __init__(self, limit=6, window=3600):
-        self.fails = collections.deque()
-        self.limit, self.window = limit, window
+    LIMITS = ((6, 3600), (15, 86400))
+
+    def __init__(self, path=None):
+        self.path = path
         self.lock = threading.Lock()
+        self.fails = []
+        try:
+            with open(path, encoding="utf8") as f:
+                self.fails = [float(t) for t in json.load(f)]
+        except (OSError, ValueError, TypeError):
+            pass
 
     def _trim(self):
-        while self.fails and self.fails[0] < time.time() - self.window:
-            self.fails.popleft()
+        self.fails = [t for t in self.fails if t > time.time() - 86400]
 
     def locked(self):
         with self.lock:
             self._trim()
-            return len(self.fails) >= self.limit
+            now = time.time()
+            return any(sum(t > now - window for t in self.fails) >= limit for limit, window in self.LIMITS)
 
     def fail(self):
         with self.lock:
+            self._trim()
             self.fails.append(time.time())
+            if self.path:
+                try:
+                    with open(self.path, "w", encoding="utf8") as f:
+                        json.dump(self.fails, f)
+                except OSError as e:
+                    log.warning("PIN-Sperre nicht speicherbar: %s", e)
 
 
 def normalize_number(n):
@@ -989,7 +1006,7 @@ class App:
         self.cfg = cfg
         self.rmm = Rmm(cfg["rmm_url"], cfg["rmm_token"])
         self.assistant = Assistant(self.rmm, cfg["model"], cfg["effort"], self.rmm.scopes())
-        self.lockout = Lockout()
+        self.lockout = Lockout(cfg["lockout_file"])
         self._names, self._names_at = [], 0
         if with_phone:
             self.tts = make_tts(cfg)
@@ -1075,11 +1092,46 @@ def fix_pyvoip_dtmf():
     RTP.RTPClient.parse_telephone_event = parse_telephone_event
 
 
+def fix_pyvoip_sip_source():
+    """pyVoIP nimmt SIP-Nachrichten von jedem Gerät im Netz an. Damit könnte jemand im LAN direkt
+    einen "Anruf" mit gefälschter Absendernummer schicken (an ALLOWED_CALLERS vorbei) oder fremde
+    Gespräche per BYE beenden. Der SIP-Socket verwirft deshalb alles, was nicht von der FRITZ!Box kommt."""
+    from pyVoIP import SIP
+
+    class OnlyFrom(socket.socket):
+        allowed = None
+
+        def recv(self, bufsize, *args):
+            while True:
+                data, addr = self.recvfrom(bufsize, *args)
+                if addr[0] == self.allowed:
+                    return data
+                log.warning("SIP-Nachricht von fremdem Gerät %s verworfen", addr[0])
+
+    def start(self):
+        if self.NSD:
+            raise RuntimeError("Attempted to start already started SIPClient")
+        self.NSD = True
+        self.s = OnlyFrom(socket.AF_INET, socket.SOCK_DGRAM)
+        self.s.allowed = socket.gethostbyname(self.server)
+        self.s.bind((self.myIP, self.myPort))
+        self.out = self.s
+        self.register()
+        t = SIP.Timer(1, self.recv_loop)
+        t.name = "SIP Recieve"
+        t.start()
+
+    SIP.SIPClient.start = start
+
+
 def run_phone(cfg):
     from pyVoIP.VoIP import VoIPPhone
 
     fix_pyvoip_pcma()
     fix_pyvoip_dtmf()
+    fix_pyvoip_sip_source()
+    if len(cfg["pin"]) < 6:
+        log.warning("Die PIN hat nur %d Ziffern – empfohlen sind mindestens 6", len(cfg["pin"]))
 
     app = App(cfg)
     try:

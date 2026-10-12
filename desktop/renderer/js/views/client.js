@@ -306,13 +306,13 @@ export function renderClient(root, { go, params }) {
     function draw() {
       const rows = list.filter((p) => !q || `${p.pid} ${p.name} ${p.user} ${p.cmd}`.toLowerCase().includes(q)).slice(0, 300);
       $('tbody', body).innerHTML = rows.map((p) => `<tr>
-        <td class="r num muted">${p.pid}</td>
+        <td class="r num muted">${Number(p.pid)}</td>
         <td style="font-weight:500">${esc(p.name)}</td>
         <td class="muted">${esc(p.user)}</td>
         <td class="r num">${p.cpu.toFixed(1).replace('.', ',')} %</td>
         <td class="r num">${fmtBytes(p.mem)}</td>
         <td class="mono muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.cmd)}">${esc(p.cmd)}</td>
-        <td class="actions"><button class="btn sm danger" data-kill="${p.pid}" data-name="${esc(p.name)}">${icon('x', 'sm')}Beenden</button></td>
+        <td class="actions"><button class="btn sm danger" data-kill="${Number(p.pid)}" data-name="${esc(p.name)}">${icon('x', 'sm')}Beenden</button></td>
       </tr>`).join('') || `<tr><td colspan="7"><div class="empty">Keine Prozesse</div></td></tr>`;
     }
     $('[data-q]', body).addEventListener('input', (e) => { q = e.target.value.toLowerCase(); draw(); });
@@ -324,7 +324,7 @@ export function renderClient(root, { go, params }) {
     body.addEventListener('click', async (e) => {
       const b = e.target.closest('[data-kill]');
       if (!b) return;
-      if (!(await confirmDialog({ title: 'Prozess beenden?', text: `<b>${esc(b.dataset.name)}</b> (PID ${b.dataset.kill}) wird sofort beendet.`, okText: 'Beenden', danger: true }))) return;
+      if (!(await confirmDialog({ title: 'Prozess beenden?', text: `<b>${esc(b.dataset.name)}</b> (PID ${Number(b.dataset.kill)}) wird sofort beendet.`, okText: 'Beenden', danger: true }))) return;
       try {
         await api.action(id, 'kill', { pid: Number(b.dataset.kill), name: b.dataset.name });
         toast('Prozess beendet');

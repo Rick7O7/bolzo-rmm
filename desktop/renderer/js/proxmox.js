@@ -159,7 +159,12 @@ async function openVmConsole(g, standalone) {
     <button class="btn sm" data-cad>Strg+Alt+Entf</button>
     <button class="btn sm" data-scale title="Bild an das Fenster anpassen oder in Originalgröße (1:1) anzeigen">${icon('grid', 'sm')}<span>Anpassen</span></button>`, standalone);
 
-  const url = api.server.replace(/^http/, 'ws') + `/ws/console?token=${encodeURIComponent(api.token)}&sid=${encodeURIComponent(info.sid)}`;
+  let url;
+  try {
+    url = await api.wsUrl('/ws/console', { sid: info.sid });
+  } catch (e) {
+    return status(e.message, 'offline');
+  }
   const rfb = new RFB(screen, url, { credentials: info.password ? { password: info.password } : undefined });
   rfb.scaleViewport = LS.get('vncScale', true);
   rfb.resizeSession = false;
@@ -360,7 +365,7 @@ export async function assignDialog(agent) {
           const on = choice?.vmid === g.vmid && choice?.type === g.type;
           return `<tr class="click" data-g="${g.type}:${g.vmid}" ${taken ? 'style="opacity:.5"' : ''}>
             <td><input type="radio" name="pveg" ${on ? 'checked' : ''} ${taken ? 'disabled' : ''}></td>
-            <td class="num">${g.vmid}</td><td style="font-weight:500">${esc(g.name)}</td><td class="muted">${kind(g.type)}</td>
+            <td class="num">${Number(g.vmid)}</td><td style="font-weight:500">${esc(g.name)}</td><td class="muted">${kind(g.type)}</td>
             <td>${statusBadge(g.status)}</td>
             <td>${match(g) ? `<span class="badge good">${icon('check')}MAC passt</span>` : taken ? `<span class="muted" style="font-size:12px">${esc(taken)}</span>` : ''}</td></tr>`;
         }).join('') || '<tr><td colspan="6"><div class="empty">Keine VMs oder Container</div></td></tr>'}</tbody></table></div>
@@ -504,14 +509,14 @@ export function renderProxmoxTab(body, hostId) {
     const main = run
       ? `<button class="btn ghost icon-only" data-k="console" title="Konsole öffnen">${icon(g.type === 'lxc' ? 'terminal' : 'monitor', 'sm')}</button>`
       : `<button class="btn ghost icon-only" data-k="start" title="Starten">${icon('play', 'sm')}</button>`;
-    return `<tr data-g="${g.hostId}:${g.type}:${g.vmid}" class="px-row ${run ? '' : 'stopped'}">
+    return `<tr data-g="${esc(g.hostId)}:${esc(g.type)}:${Number(g.vmid)}" class="px-row ${run ? '' : 'stopped'}">
       <td><div class="px-name" ${g.description ? `title="${esc(g.description)}"` : ''}>
         <span class="dot ${run ? 'online' : ''}" title="${run ? 'läuft' : esc(g.status || 'aus')}"></span>
         <span class="px-kind" title="${kind(g.type)}">${icon(g.type === 'lxc' ? 'box' : 'monitor', 'sm')}</span>
-        <div class="px-nt"><div><span class="n">${esc(g.name)}</span><span class="id">${g.vmid}</span>${g.onboot ? '' : ''}</div><div class="px-sub">${sub}</div></div>
+        <div class="px-nt"><div><span class="n">${esc(g.name)}</span><span class="id">${Number(g.vmid)}</span>${g.onboot ? '' : ''}</div><div class="px-sub">${sub}</div></div>
       </div></td>
       <td class="mono px-ip">${g.ips?.length ? esc(g.ips[0]) + (g.ips.length > 1 ? ` <span class="muted" title="${esc(g.ips.slice(1).join(', '))}">+${g.ips.length - 1}</span>` : '') : '<span class="muted">–</span>'}</td>
-      <td title="${g.cpus ? `${g.cpus} ${g.cpus === 1 ? 'Kern' : 'Kerne'}` : ''}">${run ? pxMeter(g.cpu * 100, '', t.cpu) : '<span class="muted">–</span>'}</td>
+      <td title="${g.cpus ? `${Number(g.cpus)} ${g.cpus === 1 ? 'Kern' : 'Kerne'}` : ''}">${run ? pxMeter(g.cpu * 100, '', t.cpu) : '<span class="muted">–</span>'}</td>
       <td title="${run ? `${fmtBytes(g.mem)} / ` : ''}${fmtBytes(g.maxmem)}">${run ? pxMeter(memP, 'mem', t.mem) : `<span class="muted">${fmtBytes(g.maxmem)}</span>`}</td>
       <td class="${run ? '' : 'muted'}">${run ? fmtDuration(g.uptime) : '–'}</td>
       <td>${a ? `<a href="#/client/${a.id}" class="link-client"><span class="dot ${a.online ? 'online' : 'offline'}"></span>${esc(a.name)}</a>${run && !a.online ? ` <button class="btn ghost icon-only px-fix" data-k="restart-agent" title="BOLZO-Agent im Gast neu starten">${icon('refresh', 'sm')}</button>` : ''}` : '<span class="muted">–</span>'}</td>
