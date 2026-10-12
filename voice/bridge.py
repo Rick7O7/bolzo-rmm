@@ -559,12 +559,20 @@ def run_phone(cfg):
     phone = VoIPPhone(cfg["fritzbox"], cfg["sip_port"], cfg["sip_user"], cfg["sip_pass"],
                       myIP=my_ip, callCallback=app.on_call, sipPort=cfg["local_sip_port"])
     phone.start()
+    if phone.get_status().name != "REGISTERED":
+        log.error("Anmeldung an der FRITZ!Box fehlgeschlagen (%s) – SIP_USER/SIP_PASS prüfen", phone.get_status().name)
     log.info("Als IP-Telefon '%s' bei %s angemeldet (eigene IP %s) – warte auf Anrufe", cfg["sip_user"], cfg["fritzbox"], my_ip)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    stop.wait()
+    # pyVoIP gibt nach 3 fehlgeschlagenen Neuanmeldungen (z.B. FRITZ!Box-Neustart) still auf und
+    # nimmt dann keine Anrufe mehr an (Anrufer hören "besetzt") – dann beenden, systemd startet neu.
+    while not stop.wait(15):
+        status = phone.get_status().name
+        if status in ("FAILED", "INACTIVE"):
+            log.error("Anmeldung an der FRITZ!Box verloren (%s) – starte neu", status)
+            os._exit(1)
     log.info("Beende ...")
     phone.stop()
 
