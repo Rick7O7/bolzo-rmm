@@ -1,5 +1,5 @@
 import { api, LS } from './api.js';
-import { icon, esc, $, $$, primaryIp, isPveHost } from './ui.js';
+import { icon, esc, $, $$, primaryIp, isPveHost, installWindowControls } from './ui.js';
 import { renderDashboard } from './views/dashboard.js';
 import { renderClients } from './views/clients.js';
 import { renderClient } from './views/client.js';
@@ -223,5 +223,6 @@ api.on('agents', () => {
 api.on('logout', () => showLogin());
 window.addEventListener('hashchange', route);
 
+installWindowControls();
 if (api.loggedIn) start();
 else showLogin();

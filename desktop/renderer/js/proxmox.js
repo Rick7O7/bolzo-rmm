@@ -31,8 +31,18 @@ export async function pvePower({ hostId, vmid, type, name }, op) {
   }
 }
 
+// In der Desktop-App öffnet jede Konsole ein eigenes Fenster (console.html), sonst als Überlagerung
 export function openConsole(g) {
-  return g.type === 'lxc' ? openContainerConsole(g) : openVmConsole(g);
+  if (window.rmmDesk?.openConsole) {
+    const { hostId, vmid, type, name, label, hostName } = g;
+    window.rmmDesk.openConsole({ hostId, vmid, type, name, label, hostName });
+    return;
+  }
+  return mountConsole(g);
+}
+
+export function mountConsole(g, { standalone = false } = {}) {
+  return g.type === 'lxc' ? openContainerConsole(g, standalone) : openVmConsole(g, standalone);
 }
 
 function popupMenu(anchor, items, onPick) {
@@ -51,10 +61,10 @@ function popupMenu(anchor, items, onPick) {
 }
 
 // ---------- Konsolen-Fenster ----------
-function consoleFrame(g, extraBar = '') {
-  const overlay = el(`<div class="console-overlay">
+function consoleFrame(g, extraBar = '', standalone = false) {
+  const overlay = el(`<div class="console-overlay ${standalone ? 'standalone' : ''}">
     <div class="console-bar">
-      <button class="btn sm" data-close title="Konsole schließen">${icon('back', 'sm')}Schließen</button>
+      ${standalone ? '' : `<button class="btn sm" data-close title="Konsole schließen">${icon('back', 'sm')}Schließen</button>`}
       <span class="dot" data-dot></span>
       <div class="console-title"><b>${esc(g.label || g.name || `${kind(g.type)} ${g.vmid}`)}</b><span class="muted">${kind(g.type)} ${g.vmid}${g.hostName ? ` · ${esc(g.hostName)}` : ''}</span></div>
       <span class="muted console-status" data-status>Verbinde ...</span>
@@ -72,25 +82,31 @@ function consoleFrame(g, extraBar = '') {
   };
   $('[data-full]', overlay).onclick = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()).catch(() => {});
   $('[data-power]', overlay).onclick = (e) => popupMenu(e.currentTarget, Object.entries(OPS).map(([k, o]) => ({ k, label: `Proxmox: ${o.label}`, icon: o.icon, danger: k === 'stop' })), (op) => pvePower(g, op));
-  return { overlay, screen: $('[data-screen]', overlay), status };
+  // Schließen: in eigenem Fenster schließt das Fenster selbst (siehe onClose)
+  const onClose = (fn) => {
+    if (standalone) window.addEventListener('beforeunload', fn);
+    else $('[data-close]', overlay).onclick = fn;
+  };
+  return { overlay, screen: $('[data-screen]', overlay), status, onClose };
 }
 
-async function openVmConsole(g) {
+async function openVmConsole(g, standalone) {
   let info;
   try {
     info = await api.post(`/api/agents/${g.hostId}/pve/console`, { vmid: g.vmid, type: g.type, name: g.name });
   } catch (e) {
-    toast(e.message, 'err');
-    return;
+    if (!standalone) return toast(e.message, 'err');
+    const { status } = consoleFrame(g, '', true);
+    return status(e.message, 'offline');
   }
   const layout = LS.get('vncLayout', 'de');
-  const { overlay, screen, status } = consoleFrame(g, `
+  const { overlay, screen, status, onClose } = consoleFrame(g, `
     <select class="select sm" data-layout title="Tastaturlayout der VM (für „Text einfügen“)">
       ${Object.entries(LAYOUTS).map(([k, l]) => `<option value="${k}" ${k === layout ? 'selected' : ''}>${l}</option>`).join('')}
     </select>
     <button class="btn sm" data-paste title="Text in die VM tippen lassen">${icon('copy', 'sm')}Text einfügen</button>
     <button class="btn sm" data-cad>Strg+Alt+Entf</button>
-    <button class="btn sm" data-scale title="Bild an das Fenster anpassen oder in Originalgröße (1:1) anzeigen">${icon('grid', 'sm')}<span>Anpassen</span></button>`);
+    <button class="btn sm" data-scale title="Bild an das Fenster anpassen oder in Originalgröße (1:1) anzeigen">${icon('grid', 'sm')}<span>Anpassen</span></button>`, standalone);
 
   const url = api.server.replace(/^http/, 'ws') + `/ws/console?token=${encodeURIComponent(api.token)}&sid=${encodeURIComponent(info.sid)}`;
   const rfb = new RFB(screen, url, { credentials: info.password ? { password: info.password } : undefined });
@@ -116,16 +132,16 @@ async function openVmConsole(g) {
   $('[data-cad]', overlay).onclick = () => { rfb.sendCtrlAltDel(); rfb.focus(); };
   $('[data-layout]', overlay).onchange = (e) => LS.set('vncLayout', e.target.value);
   $('[data-paste]', overlay).onclick = () => pasteDialog(rfb, () => $('[data-layout]', overlay).value);
-  $('[data-close]', overlay).onclick = () => {
+  onClose(() => {
     closed = true;
     try { rfb.disconnect(); } catch {}
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     overlay.remove();
-  };
+  });
 }
 
-function openContainerConsole(g) {
-  const { overlay, screen, status } = consoleFrame(g, `<span class="muted" style="font-size:12px">Markieren + Strg+C = kopieren · Strg+V oder Rechtsklick = einfügen</span>`);
+function openContainerConsole(g, standalone) {
+  const { overlay, screen, status, onClose } = consoleFrame(g, `<span class="muted" style="font-size:12px">Markieren + Strg+C = kopieren · Strg+V oder Rechtsklick = einfügen</span>`, standalone);
   screen.classList.add('term-host');
   const term = new RemoteTerminal(screen, g.hostId, {
     extra: { lxc: g.vmid, name: g.name },
@@ -136,11 +152,11 @@ function openContainerConsole(g) {
     },
   });
   term.connect();
-  $('[data-close]', overlay).onclick = () => {
+  onClose(() => {
     term.dispose();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     overlay.remove();
-  };
+  });
 }
 
 // ---------- Text in die VM tippen ----------

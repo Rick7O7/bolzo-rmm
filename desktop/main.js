@@ -6,20 +6,16 @@ const os = require('os');
 if (!app.requestSingleInstanceLock()) app.quit();
 
 let win;
+const consoles = new Map(); // "hostId:vmid" -> Konsolen-Fenster
 
-function createWindow() {
-  nativeTheme.themeSource = 'dark';
-  win = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1024,
-    minHeight: 640,
-    title: 'BOLZO RMM',
+// Gemeinsame Fenster-Einstellungen: ohne Windows-Titelleiste, die Fensterknöpfe zeichnet die App selbst
+function makeWindow(opts, file, query) {
+  const w = new BrowserWindow({
     backgroundColor: '#111214',
     icon: path.join(__dirname, 'build', 'icon.png'),
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#111214', symbolColor: '#b9bcc3', height: 48 },
     show: false,
+    ...opts,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -27,29 +23,57 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-
-  Menu.setApplicationMenu(null);
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  win.once('ready-to-show', () => win.show());
+  w.loadFile(path.join(__dirname, 'renderer', file), query ? { query } : undefined);
+  w.once('ready-to-show', () => w.show());
 
   // Externe Links im Standardbrowser öffnen, nie im App-Fenster
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  w.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  win.webContents.on('will-navigate', (e, url) => {
+  w.webContents.on('will-navigate', (e, url) => {
     if (!url.startsWith('file:')) e.preventDefault();
   });
-  win.webContents.on('before-input-event', (e, input) => {
+  w.webContents.on('before-input-event', (e, input) => {
     if (input.type === 'keyDown' && (input.key === 'F12' || (input.control && input.shift && input.key === 'I'))) {
-      win.webContents.toggleDevTools();
+      w.webContents.toggleDevTools();
     }
-    if (input.type === 'keyDown' && input.key === 'F5') win.webContents.reload();
+    if (input.type === 'keyDown' && input.key === 'F5') w.webContents.reload();
+  });
+  const sendState = () => !w.isDestroyed() && w.webContents.send('win-state', { maximized: w.isMaximized(), fullscreen: w.isFullScreen() });
+  for (const ev of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) w.on(ev, sendState);
+  return w;
+}
+
+function createWindow() {
+  nativeTheme.themeSource = 'dark';
+  Menu.setApplicationMenu(null);
+  win = makeWindow({ width: 1440, height: 900, minWidth: 1024, minHeight: 640, title: 'BOLZO RMM' }, 'index.html');
+  // Hauptfenster zu = App zu (auch offene Konsolen)
+  win.on('closed', () => {
+    win = null;
+    for (const c of consoles.values()) if (!c.isDestroyed()) c.close();
   });
 }
 
+// Konsole einer VM / eines Containers in eigenem Fenster (pro Gast nur ein Fenster)
+function openConsoleWindow(g) {
+  const key = `${g.hostId}:${g.vmid}`;
+  const open = consoles.get(key);
+  if (open && !open.isDestroyed()) {
+    if (open.isMinimized()) open.restore();
+    open.focus();
+    return;
+  }
+  const query = {};
+  for (const k of ['hostId', 'vmid', 'type', 'name', 'label', 'hostName']) if (g[k] != null) query[k] = String(g[k]);
+  const w = makeWindow({ width: 1280, height: 840, minWidth: 640, minHeight: 400, title: `${g.label || g.name || g.vmid} – Konsole` }, 'console.html', query);
+  consoles.set(key, w);
+  w.on('closed', () => consoles.get(key) === w && consoles.delete(key));
+}
+
 app.on('second-instance', () => {
-  if (win) {
+  if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore();
     win.focus();
   }
@@ -82,6 +106,25 @@ function initUpdater() {
   setTimeout(check, 5000);
   setInterval(check, 4 * 3600e3);
 }
+
+// Fensterknöpfe der App (minimieren, maximieren, schließen) – wirken auf das aufrufende Fenster
+const senderWin = (e) => BrowserWindow.fromWebContents(e.sender);
+ipcMain.on('win:minimize', (e) => senderWin(e)?.minimize());
+ipcMain.on('win:toggle-maximize', (e) => {
+  const w = senderWin(e);
+  if (!w) return;
+  if (w.isFullScreen()) w.setFullScreen(false);
+  else if (w.isMaximized()) w.unmaximize();
+  else w.maximize();
+});
+ipcMain.on('win:close', (e) => senderWin(e)?.close());
+ipcMain.handle('win:state', (e) => {
+  const w = senderWin(e);
+  return { maximized: !!w?.isMaximized(), fullscreen: !!w?.isFullScreen() };
+});
+ipcMain.on('open-console', (_e, g) => {
+  if (g && g.hostId && g.vmid != null) openConsoleWindow(g);
+});
 
 ipcMain.handle('app-info', () => ({ version: app.getVersion(), packaged: app.isPackaged, hostname: os.hostname() }));
 ipcMain.handle('update-state', () => updateState);

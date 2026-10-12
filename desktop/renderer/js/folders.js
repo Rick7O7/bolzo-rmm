@@ -132,7 +132,7 @@ export function renderFolderTree(box, { selected, onSelect }) {
     const list = flatTree();
     const hidden = new Set();
     for (const { folder } of list) if (collapsed.has(folder.id)) for (const id of subtreeIds(folder.id)) if (id !== folder.id) hidden.add(id);
-    box.innerHTML = `
+    const html = `
       <div class="ft-head">Ordner<span class="grow"></span><button class="btn ghost sm icon-only" data-new title="Neuer Ordner">${icon('folderPlus', 'sm')}</button></div>
       <div class="ft-item ${selected === 'all' ? 'on' : ''}" data-sel="all" data-drop="root">${icon('grid', 'sm')}<span class="n">Alle Clients</span><span class="c">${api.agents.size}</span></div>
       ${list.filter(({ folder }) => !hidden.has(folder.id)).map(({ folder, depth, hasKids }) => `
@@ -143,7 +143,13 @@ export function renderFolderTree(box, { selected, onSelect }) {
         </div>`).join('')}
       <div class="ft-item ${selected === 'none' ? 'on' : ''}" data-sel="none" data-drop="none">${icon('monitor', 'sm')}<span class="n muted">Ohne Ordner</span><span class="c">${c.none || ''}</span></div>
       ${!api.folders.length ? '<div class="ft-hint">Ordner anlegen mit <b>+</b>, dann Clients aus der Liste hierher ziehen.</div>' : ''}`;
+    // Nur bei Änderungen neu zeichnen: Statusmeldungen der Clients kommen alle paar Sekunden, und ein
+    // Neuzeichnen zwischen Maus-Drücken und -Loslassen hat Klicks auf Ordner verschluckt
+    if (html === lastHtml) return;
+    lastHtml = html;
+    box.innerHTML = html;
   }
+  let lastHtml = '';
 
   async function folderMenu(anchor, id) {
     const f = folderById(id);

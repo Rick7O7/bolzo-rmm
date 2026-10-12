@@ -160,6 +160,39 @@ export function statusHtml(a) {
   return `<span class="status"><span class="dot online"></span>Online</span>`;
 }
 
+// ---------- Eigene Fensterknöpfe (statt der Windows-Titelleiste) ----------
+const WC_ICONS = {
+  min: '<svg viewBox="0 0 12 12"><path d="M2.5 6h7"/></svg>',
+  max: '<svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7" rx="1.5"/></svg>',
+  restore: '<svg viewBox="0 0 12 12"><rect x="2.5" y="4" width="5.5" height="5.5" rx="1.2"/><path d="M4.5 4V3.2c0-.4.3-.7.7-.7h3.6c.4 0 .7.3.7.7v3.6c0 .4-.3.7-.7.7H8"/></svg>',
+  close: '<svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6"/></svg>',
+};
+export function installWindowControls() {
+  const w = window.rmmDesk?.win;
+  if (!w || $('.winctl')) return;
+  document.documentElement.classList.add('has-winctl');
+  const box = el(`<div class="winctl">
+    <button data-wc="min" title="Minimieren">${WC_ICONS.min}</button>
+    <button data-wc="max" title="Maximieren">${WC_ICONS.max}</button>
+    <button data-wc="close" class="wc-close" title="Schließen">${WC_ICONS.close}</button>
+  </div>`);
+  document.body.append(box);
+  const maxBtn = $('[data-wc="max"]', box);
+  const draw = (st) => {
+    const big = st?.maximized || st?.fullscreen;
+    maxBtn.innerHTML = big ? WC_ICONS.restore : WC_ICONS.max;
+    maxBtn.title = big ? 'Verkleinern' : 'Maximieren';
+  };
+  box.onclick = (e) => {
+    const k = e.target.closest('[data-wc]')?.dataset.wc;
+    if (k === 'min') w.minimize();
+    if (k === 'max') w.toggleMaximize();
+    if (k === 'close') w.close();
+  };
+  w.state().then(draw).catch(() => {});
+  w.onState(draw);
+}
+
 // ---------- Toasts ----------
 export function toast(msg, type = 'ok') {
   const t = el(`<div class="toast ${type}">${icon(type === 'ok' ? 'check' : 'alert')}<span>${esc(msg)}</span></div>`);
