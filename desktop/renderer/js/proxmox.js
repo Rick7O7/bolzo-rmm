@@ -2,7 +2,7 @@
 // und die Konsole öffnen – VMs als Bildschirm (noVNC), Container als echtes Terminal.
 import RFB from '../../node_modules/@novnc/novnc/core/rfb.js';
 import { api, LS } from './api.js';
-import { icon, esc, el, $, $$, modal, toast, confirmDialog, fmtBytes, fmtDuration, level, tagHtml, osShort } from './ui.js';
+import { icon, esc, el, $, $$, modal, toast, confirmDialog, fmtBytes, fmtDuration, level, tagHtml, osShort, memPct, throttle } from './ui.js';
 import { RemoteTerminal } from './terminal.js';
 
 export const kind = (type) => (type === 'lxc' ? 'Container' : 'VM');
@@ -390,27 +390,30 @@ export const statusBadge = (s) => (s === 'running'
   ? `<span class="badge good">läuft</span>`
   : s === 'stopped' ? `<span class="badge">aus</span>` : `<span class="badge warning">${esc(s || '?')}</span>`);
 
-// ---------- Tab "Proxmox" beim Host ----------
-// Gäste-Tabelle für einen Host oder – mit einer Liste von Host-IDs – für mehrere Server zusammen
-export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
+// ---------- Gäste-Tabelle (Layout "A": kompakt, nach Server gruppiert) ----------
+// Für einen Host oder – mit einer Liste von Host-IDs – für mehrere Server zusammen.
+// Klick auf eine Zeile öffnet die Gast-Seite; Aktionen erscheinen beim Überfahren der Zeile.
+const pxMeter = (pct, kind = '', threshold = 90) => (pct == null || !isFinite(pct) ? '<span class="muted">–</span>'
+  : `<div class="px-meter"><span class="px-track"><i class="${kind} ${level(pct, threshold)}" style="width:${Math.min(100, pct)}%"></i></span><b>${pct < 10 ? pct.toFixed(1).replace('.', ',') : Math.round(pct)}%</b></div>`);
+
+export function renderProxmoxTab(body, hostId) {
   const hostIds = Array.isArray(hostId) ? hostId : [hostId];
   const multi = Array.isArray(hostId);
   const hostOf = (id) => api.agents.get(id);
-  const cols = multi ? 13 : 12;
-  let filter = '';
+  const COLS = 7;
+  const filt = { q: '', state: LS.get('pve.fState', 'all'), kind: LS.get('pve.fKind', 'all') };
   body.innerHTML = `
-    <div class="toolbar">
-      <div class="search" style="width:240px">${icon('search', 'sm')}<input class="input" placeholder="Name, ID, IP, Tag ..." data-gfilter></div>
-      <span class="muted" style="font-size:13px" data-ver></span>
+    <div class="toolbar px-toolbar">
+      <div class="search" style="width:260px">${icon('search', 'sm')}<input class="input" placeholder="Name, ID, IP, Tag ..." data-gfilter></div>
+      <div class="seg" data-fstate></div>
+      <div class="seg" data-fkind></div>
       <span class="spacer grow"></span>
-      <button class="btn" data-auto title="Clients anhand der MAC-Adresse ihrer VM/ihrem Container zuordnen">${icon('link', 'sm')}Automatisch zuordnen</button>
-      <button class="btn" data-refresh>${icon('refresh', 'sm')}Aktualisieren</button>
+      <button class="btn ghost" data-auto title="Clients anhand der MAC-Adresse ihrer VM/ihrem Container zuordnen">${icon('link', 'sm')}Automatisch zuordnen</button>
+      <button class="btn ghost icon-only" data-refresh title="Aktualisieren">${icon('refresh', 'sm')}</button>
     </div>
-    <div class="card table-wrap"><table class="tbl"><thead><tr>
-      <th>ID</th><th>Name</th>${multi ? '<th>Server</th>' : ''}<th>Typ</th><th>Status</th><th>IP-Adresse</th><th>CPU</th><th>RAM</th><th>Disk</th><th>Netzwerk</th><th>Laufzeit</th><th>BOLZO-Client</th><th></th>
-    </tr></thead><tbody><tr><td colspan="${cols}"><div class="empty">Lade ...</div></td></tr></tbody></table></div>`;
-  const p = hostOf(hostIds[0])?.info?.proxmox;
-  $('[data-ver]', body).textContent = compact || multi || !p ? '' : `Proxmox VE ${p.version || ''} · Knoten ${p.node}`;
+    <div class="card table-wrap px-wrap"><table class="tbl px-tbl"><thead><tr>
+      <th>Name</th><th>IP-Adresse</th><th class="px-mcol">CPU</th><th class="px-mcol">RAM</th><th>Laufzeit</th><th>BOLZO-Client</th><th class="px-acol"></th>
+    </tr></thead><tbody><tr><td colspan="${COLS}"><div class="empty">Lade ...</div></td></tr></tbody></table></div>`;
   let guests = [];
   let failed = [];
   let lastHtml = '';
@@ -425,87 +428,129 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     guests = [];
     results.forEach((r, i) => {
       const h = hostOf(online[i]);
-      if (r.status === 'fulfilled' && r.value) guests.push(...r.value.guests.map((g) => ({ ...g, hostId: h.id, hostName: h.name })));
+      if (r.status === 'fulfilled' && r.value) guests.push(...r.value.guests.filter((g) => !g.template).map((g) => ({ ...g, hostId: h.id, hostName: h.name })));
       else if (r.status === 'rejected') failed.push(`${h.name}: ${r.reason.message}`);
     });
     if (!guests.length && failed.length && !multi) {
-      setBody(`<tr><td colspan="${cols}"><div class="empty err-text">${esc(failed.join(' · '))}</div></td></tr>`);
+      setBody(`<tr><td colspan="${COLS}"><div class="empty err-text">${esc(failed.join(' · '))}</div></td></tr>`);
       return;
     }
-    if (multi) guests.sort((a, b) => a.hostName.localeCompare(b.hostName) || a.vmid - b.vmid);
     draw();
   }
 
   async function load(force = true) {
     const online = hostIds.filter((id) => hostOf(id)?.online);
     if (!online.length) {
-      setBody(`<tr><td colspan="${cols}"><div class="empty">${icon('server')}<h3>${multi ? 'Kein Proxmox-Server online' : 'Host ist offline'}</h3></div></td></tr>`);
+      setBody(`<tr><td colspan="${COLS}"><div class="empty">${icon('server')}<h3>${multi ? 'Kein Proxmox-Server online' : 'Host ist offline'}</h3></div></td></tr>`);
       return;
     }
     collect(await Promise.allSettled(online.map((id) => fetchGuests(id, force ? 0 : 10000))), online);
   }
 
-  function draw() {
-    const t = api.settings.thresholds;
-    const q = filter.trim().toLowerCase();
-    const shown = guests.filter((g) => !g.template && (!q || [g.vmid, g.name, g.hostName, ...(g.ips || []), ...(g.tags || []), api.agents.get(g.agentId)?.name].join(' ').toLowerCase().includes(q)));
-    const note = multi && failed.length ? `<tr><td colspan="${cols}" class="pve-failed">${icon('alert', 'sm')}${esc(failed.join(' · '))}</td></tr>` : '';
-    setBody(note + shown.map((g) => {
-      const a = g.agentId && api.agents.get(g.agentId);
-      const run = g.status === 'running';
-      const osText = a ? osShort(a) : OSTYPES[g.ostype] ?? g.ostype ?? '';
-      const memPct = g.maxmem ? (100 * g.mem) / g.maxmem : null;
-      const diskPct = g.type === 'lxc' && g.maxdisk ? (100 * g.disk) / g.maxdisk : null; // VMs melden keine Belegung
-      return `<tr data-g="${g.hostId}:${g.type}:${g.vmid}" class="pve-row">
-        <td class="num">${g.vmid}</td>
-        <td class="pve-name-cell" ${g.description ? `title="${esc(g.description)}"` : ''}>
-          <a class="n pve-open" data-k="settings" title="Details öffnen">${esc(g.name)}</a>
-          ${g.tags?.length ? `<div class="sub">${g.tags.map((x) => tagHtml(x, { small: true })).join('')}</div>` : g.description ? `<div class="sub muted">${esc(g.description)}</div>` : ''}
-        </td>
-        ${multi ? `<td class="pve-host-cell">${esc(g.hostName)}</td>` : ''}
-        <td><div>${kind(g.type)}</div>${osText ? `<div class="sub muted">${esc(osText)}</div>` : ''}</td>
-        <td><div>${statusBadge(g.status)}</div><div class="sub muted">${[g.onboot ? 'Autostart' : '', g.lock ? `gesperrt: ${esc(g.lock)}` : ''].filter(Boolean).join(' · ')}</div></td>
-        <td class="mono pve-ips">${g.ips?.length ? g.ips.map((ip) => `<div>${esc(ip)}</div>`).join('') : '<span class="muted">–</span>'}</td>
-        <td><div>${run ? miniBar(g.cpu * 100, '', t.cpu) : '<span class="muted">–</span>'}</div><div class="sub muted">${g.cpus ? `${g.cpus} ${g.cpus === 1 ? 'Kern' : 'Kerne'}` : ''}</div></td>
-        <td><div>${run ? miniBar(memPct, 'mem', t.mem) : '<span class="muted">–</span>'}</div><div class="sub muted num">${run ? `${fmtBytes(g.mem)} / ` : ''}${fmtBytes(g.maxmem)}</div></td>
-        <td><div>${diskPct != null ? miniBar(diskPct, '', t.disk) : '<span class="muted">–</span>'}</div><div class="sub muted num">${diskPct != null ? `${fmtBytes(g.disk)} / ` : ''}${g.maxdisk ? fmtBytes(g.maxdisk) : ''}</div></td>
-        <td class="num pve-net">${run ? `<div title="Empfangen seit dem Start">↓ ${fmtBytes(g.netin)}</div><div title="Gesendet seit dem Start">↑ ${fmtBytes(g.netout)}</div>` : '<span class="muted">–</span>'}</td>
-        <td class="muted">${run ? fmtDuration(g.uptime) : '–'}</td>
-        <td>${a ? `<a href="#/client/${a.id}" class="link-client"><span class="dot ${a.online ? 'online' : 'offline'}"></span>${esc(a.name)}</a>
-          ${run && !a.online ? `<div><button class="btn sm ghost pve-fix" data-k="restart-agent" title="BOLZO-Agent im Gast neu starten">${icon('refresh', 'sm')}Agent neu starten</button></div>` : ''}` : '<span class="muted">–</span>'}</td>
-        <td class="actions" style="white-space:nowrap">
-          ${run ? `<button class="btn sm" data-k="console">${icon(g.type === 'lxc' ? 'terminal' : 'monitor', 'sm')}Konsole</button>` : `<button class="btn sm" data-k="start">${icon('play', 'sm')}Starten</button>`}
-          <button class="btn sm icon-only" data-k="settings" title="Details & Einstellungen">${icon('sliders', 'sm')}</button>
-          <button class="btn sm icon-only" data-k="more" title="Weitere Aktionen">⋯</button>
-        </td></tr>`;
-    }).join('') || `<tr><td colspan="${cols}"><div class="empty">${q ? 'Kein Gast passt zum Filter' : 'Keine VMs oder Container'}</div></td></tr>`);
+  const matches = (g) => {
+    if (filt.state === 'running' && g.status !== 'running') return false;
+    if (filt.state === 'stopped' && g.status === 'running') return false;
+    if (filt.kind !== 'all' && g.type !== filt.kind) return false;
+    const q = filt.q.trim().toLowerCase();
+    return !q || [g.vmid, g.name, g.hostName, ...(g.ips || []), ...(g.tags || []), api.agents.get(g.agentId)?.name].join(' ').toLowerCase().includes(q);
+  };
+
+  function drawFilters() {
+    const base = guests.filter((g) => filt.kind === 'all' || g.type === filt.kind);
+    const run = base.filter((g) => g.status === 'running').length;
+    const seg = (key, items) => items.map(([k, label, n]) => `<button class="${filt[key] === k ? 'on' : ''}" data-f="${key}:${k}">${label}${n != null ? ` <em>${n}</em>` : ''}</button>`).join('');
+    const a = seg('state', [['all', 'Alle', base.length], ['running', 'Laufend', run], ['stopped', 'Gestoppt', base.length - run]]);
+    const b = seg('kind', [['all', 'Alle'], ['qemu', 'VMs'], ['lxc', 'Container']]);
+    if ($('[data-fstate]', body).innerHTML !== a) $('[data-fstate]', body).innerHTML = a;
+    if ($('[data-fkind]', body).innerHTML !== b) $('[data-fkind]', body).innerHTML = b;
   }
-  $('[data-gfilter]', body).addEventListener('input', (e) => { filter = e.target.value; draw(); });
+
+  function row(g) {
+    const t = api.settings.thresholds;
+    const a = g.agentId && api.agents.get(g.agentId);
+    const run = g.status === 'running';
+    const osText = a ? osShort(a) : OSTYPES[g.ostype] ?? g.ostype ?? '';
+    const memP = run && g.maxmem ? (100 * g.mem) / g.maxmem : null;
+    const sub = g.tags?.length ? g.tags.map((x) => tagHtml(x, { small: true })).join('')
+      : `<span class="muted">${esc([osText, g.lock ? `gesperrt: ${g.lock}` : ''].filter(Boolean).join(' · ') || kind(g.type))}</span>`;
+    const main = run
+      ? `<button class="btn ghost icon-only" data-k="console" title="Konsole öffnen">${icon(g.type === 'lxc' ? 'terminal' : 'monitor', 'sm')}</button>`
+      : `<button class="btn ghost icon-only" data-k="start" title="Starten">${icon('play', 'sm')}</button>`;
+    return `<tr data-g="${g.hostId}:${g.type}:${g.vmid}" class="px-row ${run ? '' : 'stopped'}">
+      <td><div class="px-name" ${g.description ? `title="${esc(g.description)}"` : ''}>
+        <span class="dot ${run ? 'online' : ''}" title="${run ? 'läuft' : esc(g.status || 'aus')}"></span>
+        <span class="px-kind" title="${kind(g.type)}">${icon(g.type === 'lxc' ? 'box' : 'monitor', 'sm')}</span>
+        <div class="px-nt"><div><span class="n">${esc(g.name)}</span><span class="id">${g.vmid}</span>${g.onboot ? '' : ''}</div><div class="px-sub">${sub}</div></div>
+      </div></td>
+      <td class="mono px-ip">${g.ips?.length ? esc(g.ips[0]) + (g.ips.length > 1 ? ` <span class="muted" title="${esc(g.ips.slice(1).join(', '))}">+${g.ips.length - 1}</span>` : '') : '<span class="muted">–</span>'}</td>
+      <td title="${g.cpus ? `${g.cpus} ${g.cpus === 1 ? 'Kern' : 'Kerne'}` : ''}">${run ? pxMeter(g.cpu * 100, '', t.cpu) : '<span class="muted">–</span>'}</td>
+      <td title="${run ? `${fmtBytes(g.mem)} / ` : ''}${fmtBytes(g.maxmem)}">${run ? pxMeter(memP, 'mem', t.mem) : `<span class="muted">${fmtBytes(g.maxmem)}</span>`}</td>
+      <td class="${run ? '' : 'muted'}">${run ? fmtDuration(g.uptime) : '–'}</td>
+      <td>${a ? `<a href="#/client/${a.id}" class="link-client"><span class="dot ${a.online ? 'online' : 'offline'}"></span>${esc(a.name)}</a>${run && !a.online ? ` <button class="btn ghost icon-only px-fix" data-k="restart-agent" title="BOLZO-Agent im Gast neu starten">${icon('refresh', 'sm')}</button>` : ''}` : '<span class="muted">–</span>'}</td>
+      <td class="px-acts"><div>${main}${run ? `<button class="btn ghost icon-only" data-k="shutdown" title="Herunterfahren">${icon('power', 'sm')}</button>` : ''}<button class="btn ghost icon-only" data-k="more" title="Weitere Aktionen">${icon('more', 'sm')}</button></div></td>
+    </tr>`;
+  }
+
+  function draw() {
+    drawFilters();
+    const shown = guests.filter(matches);
+    const note = multi && failed.length ? `<tr class="px-group"><td colspan="${COLS}" class="pve-failed">${icon('alert', 'sm')}${esc(failed.join(' · '))}</td></tr>` : '';
+    let html = '';
+    if (multi) {
+      for (const id of hostIds) {
+        const h = hostOf(id);
+        const mine = shown.filter((g) => g.hostId === id).sort((a, b) => a.vmid - b.vmid);
+        if (!mine.length) continue;
+        const all = guests.filter((g) => g.hostId === id);
+        const m = h?.metrics;
+        html += `<tr class="px-group"><td colspan="${COLS}"><b>${esc(h?.name || id)}</b><span>${all.filter((g) => g.status === 'running').length} von ${all.length} laufen${m ? ` · CPU ${Math.round(m.cpu)} % · RAM ${Math.round(memPct(m) || 0)} %` : ''}</span></td></tr>`
+          + mine.map(row).join('');
+      }
+    } else {
+      html = shown.sort((a, b) => a.vmid - b.vmid).map(row).join('');
+    }
+    const q = filt.q || filt.state !== 'all' || filt.kind !== 'all';
+    setBody(note + (html || `<tr><td colspan="${COLS}"><div class="empty">${q ? 'Kein Gast passt zum Filter' : 'Keine VMs oder Container'}</div></td></tr>`));
+  }
+
+  $('[data-gfilter]', body).addEventListener('input', (e) => { filt.q = e.target.value; draw(); });
+  $('.px-toolbar', body).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-f]');
+    if (!b) return;
+    const [key, val] = b.dataset.f.split(':');
+    filt[key] = val;
+    LS.set(key === 'state' ? 'pve.fState' : 'pve.fKind', val);
+    draw();
+  });
 
   const guestOf = (tr) => {
     const [hid, type, vmid] = tr.dataset.g.split(':');
     const g = guests.find((x) => x.hostId === hid && x.type === type && x.vmid === Number(vmid));
-    return { ...g, label: g.name };
+    return g && { ...g, label: g.name };
   };
+  const openGuest = (g) => { location.hash = `#/guest/${g.hostId}/${g.type}/${g.vmid}`; };
   $('tbody', body).onclick = async (e) => {
+    const tr = e.target.closest('tr[data-g]');
+    if (!tr || e.target.closest('a')) return;
+    const g = guestOf(tr);
+    if (!g) return;
     const b = e.target.closest('[data-k]');
-    if (!b) return;
-    const g = guestOf(b.closest('tr'));
-    if (b.dataset.k === 'console') return openConsole(g);
-    if (b.dataset.k === 'start') return (await pvePower(g, 'start')) && setTimeout(load, 2500);
-    if (b.dataset.k === 'restart-agent') return restartAgent(g, b);
-    if (b.dataset.k === 'settings') { location.hash = `#/guest/${g.hostId}/${g.type}/${g.vmid}`; return; }
+    if (!b) return openGuest(g); // Klick auf die Zeile: Gast-Seite
+    const k = b.dataset.k;
+    if (k === 'console') return openConsole(g);
+    if (k === 'start' || k === 'shutdown') return (await pvePower(g, k)) && setTimeout(load, 2500);
+    if (k === 'restart-agent') return restartAgent(g, b);
     const ops = g.status === 'running' ? ['shutdown', 'reboot', 'stop'] : ['start'];
     popupMenu(b, [
-      ...ops.map((k) => ({ k, label: OPS[k].label, icon: OPS[k].icon, danger: k === 'stop' })),
+      ...ops.map((o) => ({ k: o, label: OPS[o].label, icon: OPS[o].icon, danger: o === 'stop' })),
       ...(g.status === 'running' ? [{ k: 'console', label: 'Konsole öffnen', icon: g.type === 'lxc' ? 'terminal' : 'monitor' }] : []),
       ...(g.status === 'running' && (g.type === 'lxc' || g.agentId) ? [{ k: 'restart-agent', label: 'BOLZO-Agent im Gast neu starten', icon: 'refresh' }] : []),
       { k: 'settings', label: 'Details & Einstellungen', icon: 'sliders' },
-    ], async (k) => {
-      if (k === 'console') return openConsole(g);
-      if (k === 'restart-agent') return restartAgent(g);
-      if (k === 'settings') { location.hash = `#/guest/${g.hostId}/${g.type}/${g.vmid}`; return; }
-      if (await pvePower(g, k)) setTimeout(load, 2500);
+    ], async (o) => {
+      if (o === 'console') return openConsole(g);
+      if (o === 'restart-agent') return restartAgent(g);
+      if (o === 'settings') return openGuest(g);
+      if (await pvePower(g, o)) setTimeout(load, 2500);
     });
   };
   async function restartAgent(g, btn) {
@@ -520,9 +565,9 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     }
   }
 
-  $('[data-refresh]', body).onclick = load;
+  $('[data-refresh]', body).onclick = () => load(true);
   $('[data-auto]', body).onclick = async () => {
-    const free = guests.filter((g) => !g.agentId && !g.template);
+    const free = guests.filter((g) => !g.agentId);
     const pairs = [];
     for (const a of api.agents.values()) {
       if (a.info?.proxmox || a.pve) continue;
@@ -539,11 +584,14 @@ export function renderProxmoxTab(body, hostId, { compact = false } = {}) {
     toast(`${ok} Client(s) zugeordnet`);
     load();
   };
+
   // Zuerst sofort den gespeicherten Stand zeigen (falls vorhanden), dann frisch laden
   const online0 = hostIds.filter((id) => hostOf(id)?.online);
   if (online0.length && online0.every((id) => cachedGuests(id))) collect(online0.map((id) => ({ status: 'fulfilled', value: cachedGuests(id) })), online0);
   load(false);
-  return poll(load, 15000);
+  const offAgents = api.on('agents', throttle(() => guests.length && draw(), 2000)); // Client-Status (Punkt) aktuell halten
+  const stop = poll(load, 15000);
+  return () => { stop(); offAgents(); };
 }
 
 // =====================================================================

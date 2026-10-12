@@ -716,3 +716,47 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .console-window { background: #000; }
 .console-overlay.standalone .console-bar { min-height: 48px; }
 .console-msg { position: fixed; inset: 0; display: grid; place-items: center; color: var(--text-2); font-size: 14px; background: var(--bg); -webkit-app-region: drag; }
+
+/* ---------- Proxmox-Seite, Layout A (App 1.12) ---------- */
+.ph-cards { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-bottom: 18px; }
+.btn[hidden] { display: none; }
+.ph-card.off .px-meter b { color: var(--muted); }
+.ph-card { gap: 10px; padding: 12px 14px 13px; }
+.ph-top { gap: 8px; }
+.ph-top > .icon { color: var(--text-2); }
+.ph-card.on .ph-top > .icon { color: var(--accent); }
+.ph-name { flex: none; max-width: 50%; }
+.ph-ver { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.ph-meters { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.ph-meters label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+.px-meter { display: grid; grid-template-columns: 1fr 40px; gap: 8px; align-items: center; }
+.px-meter b { font-weight: 500; font-size: 12px; text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.px-track { position: relative; height: 5px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.px-track i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--series-cpu); }
+.px-track i.mem { background: var(--series-mem); }
+.px-track i.warning { background: var(--warning); }
+.px-track i.critical { background: var(--critical); }
+.px-toolbar { flex-wrap: wrap; }
+.px-tbl td { height: 48px; padding-top: 0; padding-bottom: 0; vertical-align: middle; }
+.px-tbl th.px-mcol { width: 150px; }
+.px-tbl th.px-acol { width: 104px; }
+.px-row { cursor: pointer; }
+.px-row:hover td { background: var(--hover); }
+.px-row.stopped .px-ip, .px-row.stopped .n { color: var(--text-2); }
+.px-group td { height: 34px; background: var(--surface-2); font-size: 12px; color: var(--text-2); position: sticky; top: 37px; z-index: 1; }
+.px-group td b { font-weight: 600; color: var(--text); }
+.px-group td span { color: var(--muted); margin-left: 8px; }
+.px-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.px-name .dot { flex: none; }
+.px-kind { width: 26px; height: 26px; border-radius: 7px; background: var(--surface-3); color: var(--text-2); display: grid; place-items: center; flex: none; }
+.px-kind .icon { width: 14px; height: 14px; }
+.px-nt { min-width: 0; }
+.px-nt .n { font-weight: 550; }
+.px-nt .id { color: var(--muted); font-size: 12px; margin-left: 6px; font-variant-numeric: tabular-nums; }
+.px-sub { display: flex; gap: 4px; margin-top: 2px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.px-ip { font-size: 12.5px; white-space: nowrap; }
+.px-acts > div { display: flex; justify-content: flex-end; gap: 2px; opacity: 0; transition: opacity 0.1s; }
+.px-row:hover .px-acts > div, .px-acts > div:focus-within { opacity: 1; }
+.px-acts .btn { width: 30px; height: 30px; }
+.px-fix { width: 24px; height: 24px; color: var(--warning); vertical-align: middle; }
+@media (hover: none) { .px-acts > div { opacity: 1; } }
