@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -264,6 +264,19 @@ async function linuxProcesses() {
     out.push({ pid: Number(pid), name: p.name, user: users[uid] || uid || '', cpu: Math.round(cpu * 10) / 10, mem: p.rss, cmd: cmd.slice(0, 300) });
   }
   return out.sort((x, y) => y.cpu - x.cpu || y.mem - x.mem);
+}
+
+async function quickProcesses() {
+  if (!IS_WIN) {
+    return fs.readdirSync('/proc').filter((pid) => /^\d+$/.test(pid)).map((pid) => {
+      const stat = readFile(`/proc/${pid}/stat`);
+      return { pid: Number(pid), name: stat.slice(stat.indexOf('(') + 1, stat.lastIndexOf(')')) };
+    }).filter((p) => p.name);
+  }
+  const r = await exec('tasklist', ['/fo', 'csv', '/nh'], { timeout: 20000 });
+  if (r.code !== 0) return windowsProcesses();
+  return r.stdout.split(/\r?\n/).map((l) => l.match(/^"([^"]*)","(\d+)"/)).filter(Boolean)
+    .map((m) => ({ pid: Number(m[2]), name: m[1].replace(/\.exe$/i, '') }));
 }
 
 async function windowsProcesses() {
@@ -1303,7 +1316,8 @@ function send(msg) {
 
 const actions = {
   info: getInfo,
-  processes: () => (IS_WIN ? windowsProcesses() : linuxProcesses()),
+  // fast: nur Name + PID (z.B. zum Beenden per Sprachsteuerung) – ohne die langsame CPU-Messung
+  processes: ({ fast } = {}) => (fast ? quickProcesses() : IS_WIN ? windowsProcesses() : linuxProcesses()),
   kill: ({ pid }) => {
     if (!Number.isInteger(pid) || pid <= 4) throw new Error('Ungültige PID');
     process.kill(pid, 'SIGKILL');

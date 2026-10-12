@@ -241,14 +241,16 @@ class Stt:
     def __init__(self, model, download_dir):
         from faster_whisper import WhisperModel  # erst hier laden – dauert ein paar Sekunden
         log.info("Lade Whisper-Modell '%s' ...", model)
-        self.model = WhisperModel(model, device="cpu", compute_type="int8", download_root=download_dir)
+        self.model = WhisperModel(model, device="cpu", compute_type="int8", download_root=download_dir,
+                                  cpu_threads=os.cpu_count() or 4)
         self.lock = threading.Lock()
 
     def transcribe(self, audio8k, hint=""):
         audio16k = resample(audio8k, RATE, 16000)
         with self.lock:
             segments, _ = self.model.transcribe(audio16k, language="de", beam_size=1,
-                                                initial_prompt=hint or None, condition_on_previous_text=False)
+                                                initial_prompt=hint or None, condition_on_previous_text=False,
+                                                without_timestamps=True)
             return " ".join(s.text.strip() for s in segments).strip()
 
 
@@ -258,6 +260,7 @@ class Stt:
 class Rmm:
     def __init__(self, url, token):
         self.http = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        self._clients, self._clients_at = [], 0.0
 
     def _check(self, r):
         if r.status_code >= 400:
@@ -276,8 +279,14 @@ class Rmm:
             log.warning("Rechte des API-Zugangs unbekannt (%s) – nehme Status und Neustart an", e)
             return ["status", "power"]
 
-    def clients(self):
-        return self._check(self.http.get("/api/agents"))
+    def clients(self, max_age=3):
+        if time.time() - self._clients_at > max_age:
+            self._clients = self._check(self.http.get("/api/agents"))
+            self._clients_at = time.time()
+        return self._clients
+
+    def forget_clients(self):
+        self._clients_at = 0.0
 
     def action(self, client_id, action, params=None):
         return self._check(self.http.post(f"/api/agents/{client_id}/action", json={"action": action, "params": params or {}}, timeout=60))
@@ -348,8 +357,13 @@ ABILITIES = {
 SYSTEM = """Du bist der Telefon-Assistent von BOLZO RMM, einer Fernwartung für Server und PCs.
 Der Anrufer hat sich bereits per PIN ausgewiesen. Seine Sätze kommen aus einer Spracherkennung und
 können Hörfehler enthalten – Namen werden oft verstümmelt (z.B. "SRV MC", "Server MC", "S R V M C"
-für SRV-MC, "Krom" für chrome). Löse Rechnernamen über list_clients auf; Spitznamen über Tags oder
-Hostnamen sind erlaubt. Proxmox-VMs heißen oft wie der Rechner darin.
+für SRV-MC, "Krom" für chrome). Vor jedem Satz des Anrufers steht die aktuelle Rechnerliste in <rechner> –
+nutze sie direkt (list_clients nur zum Auffrischen). Spitznamen über Tags oder Hostnamen sind erlaubt.
+Proxmox-VMs heißen oft wie der Rechner darin.
+
+Schnell sein zählt, der Anrufer wartet am Telefon: Sind Rechner und Ziel klar, ruf das passende Werkzeug
+sofort auf, ohne vorher zu listen – kill_process und service_action finden den genauen Namen selbst und
+melden sich, wenn er nicht passt. Unabhängige Werkzeuge rufst du gemeinsam in einer Antwort auf.
 
 Du kannst: {abilities}.
 Alles andere (Terminal, frei diktierte Befehle, Einstellungen) gibt es am Telefon nicht – sag das freundlich.
@@ -373,12 +387,12 @@ def _tool(name, desc, props=None, required=None):
             "input_schema": {"type": "object", "properties": props or {}, "required": required or [], "additionalProperties": False}}
 
 
-CLIENT_ID = {"type": "string", "description": "id des Rechners aus list_clients"}
+CLIENT_ID = {"type": "string", "description": "id des Rechners aus <rechner> bzw. list_clients"}
 HOST_ID = {"type": "string", "description": "host_id des Proxmox-Servers aus list_guests"}
 TOOLS = {
-    "status": [_tool("list_clients", "Liefert alle verwalteten Rechner mit id, Name, Hostname, Tags, online/offline, CPU-, RAM- und "
-                     "Datenträger-Auslastung in Prozent, Laufzeit und Warnungen. Vor jeder Aktion an einem Rechner aufrufen, "
-                     "um ihn und seine id zu finden.")],
+    "status": [_tool("list_clients", "Liefert alle verwalteten Rechner neu (id, Name, Hostname, Tags, online/offline, CPU-, RAM- und "
+                     "Datenträger-Auslastung, Laufzeit, Warnungen) – dieselben Angaben wie in <rechner>. Nur nötig, wenn sich "
+                     "seitdem etwas geändert haben kann, z.B. ob ein Rechner nach dem Neustart wieder da ist.")],
     "power": [_tool("power_action", "Startet einen Rechner neu (reboot), fährt ihn herunter (shutdown) oder weckt einen "
                     "ausgeschalteten Rechner per Wake-on-LAN (wake).",
                     {"client_id": CLIENT_ID, "action": {"type": "string", "enum": ["reboot", "shutdown", "wake"]}}, ["client_id", "action"])],
@@ -386,14 +400,16 @@ TOOLS = {
         _tool("list_processes", "Die Programme eines Rechners, die gerade am meisten CPU oder Arbeitsspeicher brauchen "
               "(gleichnamige Prozesse zusammengefasst, mit Anzahl).", {"client_id": CLIENT_ID}, ["client_id"]),
         _tool("kill_process", "Beendet auf einem Rechner alle Prozesse mit diesem Programmnamen (z.B. chrome, notepad.exe; "
-              "Groß-/Kleinschreibung und .exe egal). Vorher list_processes aufrufen, um den genauen Namen zu kennen.",
+              "Groß-/Kleinschreibung und .exe egal, ein eindeutiger Teil des Namens reicht). Direkt aufrufen – passt der "
+              "Name nicht, kommen die laufenden Programme zurück.",
               {"client_id": CLIENT_ID, "name": {"type": "string"}}, ["client_id", "name"]),
     ],
     "services": [
         _tool("find_services", "Sucht Dienste eines Rechners, deren Name oder Beschreibung den Suchbegriff enthält "
               "(z.B. apache, spooler, docker). Liefert Name, Beschreibung und ob er läuft.",
               {"client_id": CLIENT_ID, "query": {"type": "string"}}, ["client_id", "query"]),
-        _tool("service_action", "Startet, stoppt oder startet einen Dienst neu. name exakt wie von find_services geliefert.",
+        _tool("service_action", "Startet, stoppt oder startet einen Dienst neu. name: Dienstname oder eindeutiger Suchbegriff "
+              "(z.B. spooler, apache) – direkt aufrufen; ist er nicht eindeutig, kommen die passenden Dienste zurück.",
               {"client_id": CLIENT_ID, "name": {"type": "string"}, "op": {"type": "string", "enum": ["start", "stop", "restart"]}},
               ["client_id", "name", "op"]),
     ],
@@ -429,12 +445,27 @@ def proc_key(name):
     return n[:-4] if n.endswith(".exe") else n
 
 
+def top_programs(procs, n=20):
+    """Gleichnamige Prozesse zusammenfassen, die größten zuerst."""
+    groups = {}
+    for p in procs:
+        g = groups.setdefault(proc_key(p.get("name")), {"name": p.get("name"), "count": 0, "cpu_percent": 0.0, "ram_mb": 0})
+        g["count"] += 1
+        g["cpu_percent"] += p.get("cpu") or 0
+        g["ram_mb"] += round((p.get("mem") or 0) / 1048576)
+    top = sorted(groups.values(), key=lambda g: (g["cpu_percent"], g["ram_mb"]), reverse=True)[:n]
+    for g in top:
+        g["cpu_percent"] = round(g["cpu_percent"], 1)
+    return top
+
+
 class Assistant:
     def __init__(self, rmm, model, effort, scopes=None):
         self.rmm = rmm
         self.model = model
         self.effort = effort
         self.client = anthropic.Anthropic()
+        self._guest_cache, self._guest_at = [], 0.0
         self.scopes = None
         self.set_scopes(scopes)
 
@@ -461,7 +492,9 @@ class Assistant:
             raise ToolError(f"{a['name']} ist offline.")
         return a
 
-    def _guests(self):
+    def _guests(self, max_age=5):
+        if time.time() - self._guest_at <= max_age:
+            return self._guest_cache
         out = []
         for h in self.rmm.clients():
             if not (h.get("info") or {}).get("proxmox") or not h.get("online"):
@@ -472,6 +505,7 @@ class Assistant:
                         out.append({**g, "host_id": h["id"], "host": h["name"]})
             except Exception as e:
                 log.warning("Gäste von %s nicht lesbar: %s", h["name"], e)
+        self._guest_cache, self._guest_at = out, time.time()
         return out
 
     def _guest(self, host_id, vmid):
@@ -506,30 +540,33 @@ class Assistant:
             if not ui.confirm(f"Soll ich {a['name']} wirklich {VERBS[action]}?"):
                 return no
             self._do(lambda: self.rmm.power(a["id"], action))
+            self.rmm.forget_clients()
             log.info("Ausgeführt: %s -> %s", action, a["name"])
             return f"Ausgeführt: {a['name']} {DONE[action]}."
 
         if name == "list_processes":
             a = self._client(args.get("client_id"))
-            groups = {}
-            for p in self._do(lambda: self.rmm.action(a["id"], "processes")):
-                k = proc_key(p.get("name"))
-                g = groups.setdefault(k, {"name": p.get("name"), "count": 0, "cpu_percent": 0.0, "ram_mb": 0})
-                g["count"] += 1
-                g["cpu_percent"] += p.get("cpu") or 0
-                g["ram_mb"] += round((p.get("mem") or 0) / 1048576)
-            top = sorted(groups.values(), key=lambda g: (g["cpu_percent"], g["ram_mb"]), reverse=True)[:20]
-            for g in top:
-                g["cpu_percent"] = round(g["cpu_percent"], 1)
+            top = top_programs(self._do(lambda: self.rmm.action(a["id"], "processes")))
             return json.dumps({"rechner": a["name"], "programme": top}, ensure_ascii=False)
 
         if name == "kill_process":
             a = self._client(args.get("client_id"))
             want = proc_key(args.get("name"))
-            procs = [p for p in self._do(lambda: self.rmm.action(a["id"], "processes")) if proc_key(p.get("name")) == want]
-            if not procs:
-                raise ToolError(f"Auf {a['name']} läuft kein Programm namens {args.get('name')}. Erst list_processes aufrufen.")
-            label = procs[0].get("name")
+            running = self._do(lambda: self.rmm.action(a["id"], "processes", {"fast": True}))
+            keys = {proc_key(p.get("name")) for p in running}
+            if want not in keys:
+                # Teil des Namens ("teams" -> ms-teams), aber nur wenn eindeutig
+                near = sorted(k for k in keys if len(want) >= 3 and (want in k or k in want) and k)
+                if len(near) == 1:
+                    want = near[0]
+                else:
+                    # nur im Fehlerfall die (langsamere) Liste mit CPU-Auslastung holen
+                    shown = near or [g["name"] for g in top_programs(self._do(lambda: self.rmm.action(a["id"], "processes")), 12)]
+                    raise ToolError(f"Auf {a['name']} läuft kein Programm namens {args.get('name')}"
+                                    f"{' (mehrere passen)' if len(near) > 1 else ''}. "
+                                    f"{'Passend' if near else 'Die größten laufenden Programme'}: {', '.join(shown)}.")
+            procs = [p for p in running if proc_key(p.get("name")) == want]
+            label = re.sub(r"\.exe$", "", procs[0].get("name") or want, flags=re.I)
             many = f" ({len(procs)} Prozesse)" if len(procs) > 1 else ""
             if not ui.confirm(f"Soll ich {label} auf {a['name']} beenden{many}?"):
                 return no
@@ -553,9 +590,20 @@ class Assistant:
 
         if name == "service_action":
             a = self._client(args.get("client_id"))
-            op, svc = args.get("op"), args.get("name")
+            op, q = args.get("op"), (args.get("name") or "").strip()
             if op not in SERVICE_OPS:
                 raise ToolError("Unbekannte Aktion.")
+            svcs = self._do(lambda: self.rmm.action(a["id"], "services"))
+            exact = [x for x in svcs if (x.get("name") or "").lower() in (q.lower(), q.lower() + ".service")]
+            hits = exact or [x for x in svcs if q.lower() in (x.get("name") or "").lower()
+                             or q.lower() in (x.get("description") or "").lower()]
+            if len(hits) != 1:
+                if not hits:
+                    raise ToolError(f"Auf {a['name']} gibt es keinen Dienst, der zu {q} passt.")
+                raise ToolError(f"Mehrere Dienste passen zu {q}: " + "; ".join(
+                    f"{x['name']} ({x.get('description') or ''}, {'läuft' if x.get('active') else 'gestoppt'})" for x in hits[:10])
+                    + ". Frag nach, welcher gemeint ist, und ruf dann mit dem genauen Namen auf.")
+            svc = hits[0]["name"]
             if not ui.confirm(f"Soll ich den Dienst {svc} auf {a['name']} {SERVICE_OPS[op][0]}?"):
                 return no
             self._do(lambda: self.rmm.action(a["id"], "service", {"name": svc, "op": op}))
@@ -581,6 +629,7 @@ class Assistant:
             if not ui.confirm(f"Soll ich {g['name']} auf {g['host']} {GUEST_OPS[op][0]}?"):
                 return no
             self._do(lambda: self.rmm.guest_power(g["host_id"], g, op))
+            self._guest_at = 0.0
             log.info("Ausgeführt: %s %s auf %s", g["name"], op, g["host"])
             return f"{g['name']} {GUEST_OPS[op][1]}."
 
@@ -592,6 +641,7 @@ class Assistant:
             if not ui.confirm_code(f"Achtung, endgültig: Soll ich {what} {g['name']} auf {g['host']} mit allen Daten löschen?", g["vmid"]):
                 return "Die Nummer wurde nicht richtig eingetippt – nichts gelöscht."
             self._do(lambda: self.rmm.guest_destroy(g["host_id"], g))
+            self._guest_at = 0.0
             log.warning("Ausgeführt: %s %s auf %s GELÖSCHT", what, g["name"], g["host"])
             return f"{g['name']} wird gelöscht."
 
@@ -626,13 +676,21 @@ class Assistant:
     def ask(self, messages, text, ui):
         """Verarbeitet einen Satz des Anrufers. messages wird fortgeschrieben (nur anhängen).
         ui: confirm(frage) -> bool, confirm_code(frage, nummer) -> bool, hint(text)."""
-        messages.append({"role": "user", "content": text})
-        for _ in range(10):
+        try:
+            ctx = json.dumps([client_summary(a) for a in self.rmm.clients()], ensure_ascii=False)
+            messages.append({"role": "user", "content": f"<rechner>{ctx}</rechner>\n\n{text}"})
+        except Exception as e:
+            log.warning("Rechnerliste nicht abrufbar: %s", e)
+            messages.append({"role": "user", "content": text})
+        started = time.time()
+        for rnd in range(1, 11):
+            t0 = time.time()
             try:
                 resp = self.client.beta.messages.create(
                     model=self.model,
                     max_tokens=16000,
-                    system=self.system,
+                    # Werkzeuge + Anweisungen ändern sich im Anruf nicht -> zwischenspeichern (schnellere Antwort)
+                    system=[{"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}],
                     tools=self.tools,
                     messages=messages,
                     output_config={"effort": self.effort},
@@ -651,6 +709,8 @@ class Assistant:
                 return "Ich erreiche die KI gerade nicht."
 
             messages.append({"role": "assistant", "content": resp.content})
+            calls = [b.name for b in resp.content if b.type == "tool_use"]
+            log.info("Claude Runde %d: %.1f s%s", rnd, time.time() - t0, f" -> {', '.join(calls)}" if calls else "")
             if resp.stop_reason == "refusal":
                 return "Das kann ich leider nicht ausführen."
             if resp.stop_reason == "tool_use":
@@ -658,8 +718,10 @@ class Assistant:
                 for block in resp.content:
                     if block.type != "tool_use":
                         continue
+                    t1 = time.time()
                     try:
                         out, err = self._tool(block.name, block.input, ui)
+                        log.info("Werkzeug %s: %.1f s%s", block.name, time.time() - t1, " (Fehler)" if err else "")
                     except Hangup:
                         raise
                     except Exception as e:
@@ -668,6 +730,7 @@ class Assistant:
                 messages.append({"role": "user", "content": results})
                 continue
             spoken = " ".join(b.text for b in resp.content if b.type == "text").strip()
+            log.info("Antwort nach %.1f s (%d Runden)", time.time() - started, rnd)
             return spoken or "Erledigt."
         return "Das hat zu lange gedauert. Bitte versuch es noch einmal."
 
@@ -831,7 +894,7 @@ class CallSession:
         return ok
 
     # --- Eingabe: Sprache ---
-    def record(self, max_seconds=15, wait_seconds=7, end_silence=1.2, dtmf=False):
+    def record(self, max_seconds=15, wait_seconds=7, end_silence=1.0, dtmf=False):
         """Sprache aufnehmen bis zur Pause. Mit dtmf=True beendet ein Tastendruck die Aufnahme (gibt die Taste zurück)."""
         self.drain()
         pre = collections.deque(maxlen=12)
@@ -904,8 +967,9 @@ class CallSession:
                 self.say("Sonst noch etwas?" if answered else "Ich habe nichts gehört. Was soll ich tun?")
                 continue
             hint = "BOLZO RMM. Rechner: " + ", ".join(app.client_names())
+            t0 = time.time()
             text = app.stt.transcribe(audio, hint)
-            log.info("Erkannt: %s", text)
+            log.info("Erkannt (%.1f s Sprache, %.1f s Erkennung): %s", len(audio) / RATE, time.time() - t0, text)
             if not text:
                 self.say("Das habe ich nicht verstanden. Bitte noch einmal.")
                 continue
