@@ -435,14 +435,22 @@ class Assistant:
         self.model = model
         self.effort = effort
         self.client = anthropic.Anthropic()
-        self.scopes = [s for s in (scopes or ["status", "power"]) if s in TOOLS]
-        if "status" not in self.scopes:
-            self.scopes.insert(0, "status")  # Rechner finden geht immer (Server prüft trotzdem)
-        self.tools = [t for s in self.scopes for t in TOOLS[s]]
-        if "pvedelete" in self.scopes and "proxmox" not in self.scopes:
+        self.scopes = None
+        self.set_scopes(scopes)
+
+    def set_scopes(self, scopes):
+        """Werkzeuge und Prompt passend zu den Rechten des API-Zugangs (bei jedem Anruf neu abgefragt)."""
+        scopes = [s for s in (scopes or ["status", "power"]) if s in TOOLS]
+        if "status" not in scopes:
+            scopes.insert(0, "status")  # Rechner finden geht immer (Server prüft trotzdem)
+        if scopes == self.scopes:
+            return
+        self.scopes = scopes
+        self.tools = [t for s in scopes for t in TOOLS[s]]
+        if "pvedelete" in scopes and "proxmox" not in scopes:
             self.tools.append(TOOLS["proxmox"][0])  # zum Löschen muss er die Gäste finden können (nur Liste)
-        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in self.scopes))
-        log.info("Rechte am Telefon: %s", ", ".join(self.scopes))
+        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in scopes))
+        log.info("Rechte am Telefon: %s", ", ".join(scopes))
 
     # --- Hilfen ---
     def _client(self, client_id, need_online=True):
@@ -945,6 +953,7 @@ class App:
             return
         try:
             call.answer()
+            self.assistant.set_scopes(self.rmm.scopes())  # Rechte können sich in der App geändert haben
             CallSession(self, call).run()
         except Hangup:
             log.info("Anrufer hat aufgelegt")
