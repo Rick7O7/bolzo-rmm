@@ -447,18 +447,27 @@ class CallSession:
     def run(self):
         app = self.app
         self.say("BOLZO RMM. Bitte gib deine PIN ein und bestätige mit Raute.")
-        for attempt in range(3):
+        wrong = empty = 0
+        while True:
             pin = self.read_digits()
-            if pin and hmac.compare_digest(pin, app.cfg["pin"]):
+            if not pin:
+                # nur Raute oder gar nichts gedrückt – zählt nicht als Fehlversuch
+                empty += 1
+                log.info("Keine PIN-Ziffern erhalten (%d)", empty)
+                if empty >= 3:
+                    self.say("Keine Eingabe erhalten. Auf Wiederhören.")
+                    return
+                self.say("Ich habe keine Ziffern erhalten. Bitte gib deine PIN ein und bestätige mit Raute.")
+                continue
+            if hmac.compare_digest(pin, app.cfg["pin"]):
                 break
+            wrong += 1
             app.lockout.fail()
-            log.warning("Falsche PIN (Versuch %d)", attempt + 1)
-            if attempt == 2 or app.lockout.locked():
+            log.warning("Falsche PIN (Versuch %d, %d Ziffern)", wrong, len(pin))
+            if wrong >= 3 or app.lockout.locked():
                 self.say("Die PIN ist falsch. Auf Wiederhören.")
                 return
             self.say("Falsche PIN. Bitte noch einmal.")
-        else:
-            return
 
         messages, misses = [], 0
         self.say("Hallo! Was soll ich tun?")
@@ -559,17 +568,38 @@ def fix_pyvoip_pcma():
     RTP.RTPClient.encode_packet = encode_packet
 
 
+def fix_pyvoip_dtmf():
+    """pyVoIP wertet Tastentöne (RFC 4733) nur über das Marker-Bit aus – je nach Gegenstelle kommt eine
+    Taste dann gar nicht oder mehrfach an. Alle Pakete einer Taste tragen denselben Zeitstempel:
+    darüber genau einmal pro Tastendruck melden."""
+    from pyVoIP import RTP
+    keys = "0123456789*#ABCD"
+
+    def parse_telephone_event(self, packet):
+        p = packet.payload
+        if not p or p[0] >= len(keys) or getattr(self, "_dtmf_ts", None) == packet.timestamp:
+            return
+        self._dtmf_ts = packet.timestamp
+        if self.dtmf is not None:
+            self.dtmf(keys[p[0]])
+
+    RTP.RTPClient.parse_telephone_event = parse_telephone_event
+
+
 def run_phone(cfg):
     from pyVoIP.VoIP import VoIPPhone
 
     fix_pyvoip_pcma()
+    fix_pyvoip_dtmf()
 
     app = App(cfg)
     try:
         log.info("BOLZO RMM erreichbar: %d Rechner", len(app.rmm.clients()))
     except Exception as e:
         log.error("BOLZO RMM nicht erreichbar (%s) – prüfe RMM_URL und RMM_TOKEN", e)
-    for phrase in ["BOLZO RMM. Bitte gib deine PIN ein und bestätige mit Raute.", "Hallo! Was soll ich tun?", "Noch etwas?"]:
+    for phrase in ["BOLZO RMM. Bitte gib deine PIN ein und bestätige mit Raute.", "Hallo! Was soll ich tun?", "Noch etwas?",
+                   "Ich habe keine Ziffern erhalten. Bitte gib deine PIN ein und bestätige mit Raute.",
+                   "Falsche PIN. Bitte noch einmal."]:
         app.tts.synth(phrase)  # häufige Ansagen vorab erzeugen
 
     my_ip = cfg["local_ip"] or local_ip_towards(cfg["fritzbox"], cfg["sip_port"])
