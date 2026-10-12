@@ -544,8 +544,25 @@ def local_ip_towards(host, port):
 # ---------------------------------------------------------------------------
 # Start
 # ---------------------------------------------------------------------------
+def fix_pyvoip_pcma():
+    """pyVoIP 1.6.8 kodiert bei ausgehandeltem PCMA (A-law, Standard der FRITZ!Box) fälschlich als
+    PCMU (μ-law) – das klingt extrem übersteuert. Hier richtig nach Codec kodieren."""
+    from pyVoIP import RTP
+
+    def encode_packet(self, payload):
+        if self.preference == RTP.PayloadType.PCMA:
+            return self.encode_pcma(payload)
+        if self.preference == RTP.PayloadType.PCMU:
+            return self.encode_pcmu(payload)
+        raise RTP.RTPParseError("Unsupported codec (encode): " + str(self.preference))
+
+    RTP.RTPClient.encode_packet = encode_packet
+
+
 def run_phone(cfg):
     from pyVoIP.VoIP import VoIPPhone
+
+    fix_pyvoip_pcma()
 
     app = App(cfg)
     try:
