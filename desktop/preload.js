@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('rmmDesk', {
     },
   },
   openConsole: (g) => ipcRenderer.send('open-console', g),
+  netWeb: (o) => ipcRenderer.invoke('net-web', o),
   update: {
     state: () => ipcRenderer.invoke('update-state'),
     check: () => ipcRenderer.invoke('update-check'),

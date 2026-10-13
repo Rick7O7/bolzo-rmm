@@ -2,6 +2,7 @@
 const { app, BrowserWindow, shell, Menu, nativeTheme, ipcMain } = require('electron');
 const path = require('path');
 const os = require('os');
+const net = require('net');
 const { pathToFileURL } = require('url');
 
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -127,6 +128,79 @@ ipcMain.handle('win:state', (e) => {
 });
 ipcMain.on('open-console', (_e, g) => {
   if (g && g.hostId && g.vmid != null) openConsoleWindow(g);
+});
+
+// ---------------------------------------------------------------------------
+// Weboberfläche eines Netzwerkgeräts über dessen Abfrage-Client öffnen: Die App lauscht auf einem
+// freien Port auf 127.0.0.1; jede Browser-Verbindung dorthin bekommt beim Server einen eigenen
+// Tunnel (App -> Server -> Abfrage-Client -> Gerät). Nach 30 Minuten ohne Verbindung wieder zu.
+// ---------------------------------------------------------------------------
+const webProxies = new Map(); // Geräte-ID -> { srv, port, server, token, conns, timer }
+const WEB_IDLE = 30 * 60e3;
+
+function armIdle(px) {
+  clearTimeout(px.timer);
+  px.timer = setTimeout(() => {
+    if (px.conns.size) return armIdle(px);
+    px.srv.close();
+    webProxies.delete(px.id);
+  }, WEB_IDLE);
+}
+
+async function webTunnel(sock, px) {
+  sock.pause();
+  sock.on('error', () => {});
+  px.conns.add(sock);
+  armIdle(px);
+  const post = async (p) => {
+    const r = await fetch(px.server + p, { method: 'POST', headers: { Authorization: `Bearer ${px.token}`, 'Content-Type': 'application/json' }, body: '{}' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  };
+  const done = () => { px.conns.delete(sock); sock.destroy(); };
+  try {
+    const { sid } = await post(`/api/net/${encodeURIComponent(px.id)}/web`);
+    const { ticket } = await post('/api/ws-ticket');
+    const ws = new WebSocket(`${px.server.replace(/^http/, 'ws')}/ws/console?ticket=${encodeURIComponent(ticket)}&sid=${encodeURIComponent(sid)}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      sock.on('data', (d) => ws.readyState === 1 && ws.send(d));
+      sock.resume();
+    };
+    ws.onmessage = (e) => { if (typeof e.data !== 'string') sock.write(Buffer.from(e.data)); };
+    ws.onclose = done;
+    ws.onerror = done;
+    sock.on('close', () => { px.conns.delete(sock); try { ws.close(); } catch {} });
+  } catch {
+    done();
+  }
+}
+
+ipcMain.handle('net-web', async (_e, o) => {
+  const id = String(o?.id || '');
+  const server = String(o?.server || '').replace(/\/+$/, '');
+  if (!id || !/^https?:\/\//.test(server) || !o?.token) throw new Error('Ungültige Anfrage');
+  let px = webProxies.get(id);
+  if (px && px.server !== server) {
+    px.srv.close();
+    clearTimeout(px.timer);
+    px = null;
+  }
+  if (!px) {
+    px = { id, server, conns: new Set(), timer: null };
+    px.srv = net.createServer((sock) => webTunnel(sock, px));
+    await new Promise((resolve, reject) => px.srv.once('error', reject).listen(0, '127.0.0.1', resolve));
+    px.port = px.srv.address().port;
+    webProxies.set(id, px);
+  }
+  px.token = o.token;
+  armIdle(px);
+  const scheme = o.scheme === 'https' ? 'https' : 'http';
+  const p = String(o.path || '/');
+  const url = `${scheme}://127.0.0.1:${px.port}${p.startsWith('/') ? p : '/'}`;
+  shell.openExternal(url);
+  return { url };
 });
 
 ipcMain.handle('app-info', () => ({ version: app.getVersion(), packaged: app.isPackaged, hostname: os.hostname() }));

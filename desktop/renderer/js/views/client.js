@@ -53,7 +53,7 @@ export function renderClient(root, { go, params }) {
         <div class="page-kind client">${icon('monitor', 'sm')}BOLZO-Client<span>Agent im Betriebssystem</span>
           ${a.pve ? `<a href="#/guest/${a.pve.hostId}/${a.pve.type}/${a.pve.vmid}" class="kind-switch pve" title="Proxmox-Seite: Hardware, Netzwerk, Snapshots, Backups">${icon('server', 'sm')}Proxmox-${a.pve.type === 'lxc' ? 'Container' : 'VM'} öffnen</a>` : ''}</div>
         <h1>${esc(a.name)} <button class="btn ghost sm icon-only" title="Umbenennen" data-rename>${icon('edit', 'sm')}</button></h1>
-        <div class="meta">${statusHtml(a)}<span title="${esc(a.os || '')}">${esc(osName(a))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}${pveBadge(a)}</div>
+        <div class="meta">${statusHtml(a)}<span title="${esc(a.os || '')}">${esc(osName(a))}</span><span class="mono">${esc(a.info?.interfaces?.[0]?.ip || '')}</span>${a.version ? `<span>Agent ${esc(a.version)}</span>` : ''}${a.outdated ? '<span class="badge warning">Agent veraltet</span>' : ''}${pveBadge(a)}${a.probe ? `<a class="badge accent" href="#/network" title="Fragt OPNsense, Switches und andere Netzwerkgeräte ab">${icon('radar')}Abfrage-Client</a>` : ''}</div>
         ${a.tags?.length ? `<div class="tag-row" style="margin-top:6px">${a.tags.map((t) => tagHtml(t)).join('')}</div>` : ''}
       </div>
       <div class="btn-group">
@@ -106,6 +106,7 @@ export function renderClient(root, { go, params }) {
       { k: 'folder', label: a.folderId && folderById(a.folderId) ? `Ordner: ${folderPath(a.folderId)}` : 'In Ordner verschieben', icon: 'folder' },
       ...(a.info?.proxmox ? [] : [{ k: 'pve', label: a.pve ? 'Proxmox-Zuordnung ändern' : 'Proxmox-VM zuordnen', icon: 'server' }]),
       ...(a.pve ? [{ k: 'pve-page', label: 'Proxmox-Details öffnen', icon: 'server' }] : []),
+      { k: 'probe', label: a.probe ? 'Abfrage-Client: Freigabe entfernen' : 'Als Abfrage-Client freigeben', icon: 'radar' },
       ...(a.pve && a.pve.hostOnline ? [
         { k: 'pve-reboot', label: 'Über Proxmox neu starten', icon: 'refresh' },
         { k: 'pve-stop', label: 'Über Proxmox ausschalten (hart)', icon: 'stop', danger: true },
@@ -131,6 +132,15 @@ export function renderClient(root, { go, params }) {
         if (k === 'folder') return moveMenu(anchor, [a.id]);
         if (k === 'pve') return assignDialog(a);
         if (k === 'pve-page') return go(`#/guest/${a.pve.hostId}/${a.pve.type}/${a.pve.vmid}`);
+        if (k === 'probe') {
+          const n = [...api.net.values()].filter((d) => d.probeId === a.id).length;
+          const text = a.probe
+            ? `${n ? `<b>${n} Netzwerkgerät${n === 1 ? '' : 'e'}</b> ${n === 1 ? 'wird' : 'werden'} über ${esc(a.name)} abgefragt und ${n === 1 ? 'ist' : 'sind'} danach ohne Abfrage, bis du einen anderen Abfrage-Client zuweist.` : `${esc(a.name)} fragt danach keine Netzwerkgeräte mehr ab.`}`
+            : `${esc(a.name)} darf danach OPNsense, Switches und andere Geräte für den Server abfragen (Ping, SNMP, OPNsense-API). Er muss die Geräte im Netz erreichen können. Die Zugangsdaten bleiben auf dem Server und gehen nur mit der jeweiligen Anfrage an ihn.`;
+          if (!(await confirmDialog({ title: a.probe ? 'Freigabe als Abfrage-Client entfernen?' : 'Als Abfrage-Client freigeben?', text, okText: a.probe ? 'Entfernen' : 'Freigeben', danger: a.probe && n > 0 }))) return;
+          await api.patch(`/api/agents/${id}`, { probe: !a.probe });
+          return toast(a.probe ? 'Freigabe entfernt' : `${a.name} ist jetzt Abfrage-Client – Geräte unter „Netzwerk“ hinzufügen`);
+        }
         if (k === 'pve-reboot') return pvePower(guestOf(a), 'reboot');
         if (k === 'pve-stop') return pvePower(guestOf(a), 'stop');
         if (k === 'update') {

@@ -99,6 +99,7 @@ function summarize(a, withSpark = false) {
     serverUrl: a.serverUrl || '',
     publicIp: a.publicIp || '',
     pve: a.pve ? { ...a.pve, hostName: agentLabel(store.data.agents[a.pve.hostId]) || '?', hostOnline: conns.has(a.pve.hostId) } : null,
+    probe: !!a.probe,
     folderId: a.folderId || null,
     createdAt: a.createdAt,
     lastSeen: online ? Date.now() : a.lastSeen,
@@ -228,7 +229,7 @@ function requireScope(scope) {
 }
 
 // ---- Audit-Log -------------------------------------------------------------
-// Kategorien: auth, client, power, action, script, shell, settings, system, connection
+// Kategorien: auth, client, power, action, script, shell, settings, system, connection, network
 const ipOf = (req) => String(req.ip || '').replace(/^::ffff:/, '');
 const agentLabel = (a) => (a ? a.name || a.info?.hostname || a.hostname || a.id : '');
 
@@ -367,8 +368,14 @@ app.get('/api/stats/history', requireAdmin, (req, res) => {
 
 app.patch('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
   const a = getAgent(req);
-  const { name, tags, notes, pve } = req.body || {};
+  const { name, tags, notes, pve, probe } = req.body || {};
   const before = { label: agentLabel(a), tags: a.tags || [], notes: a.notes || '' };
+  // Abfrage-Client: fragt OPNsense, Switches und andere Netzwerkgeräte ab (siehe network.js)
+  if (typeof probe === 'boolean' && probe !== !!a.probe) {
+    a.probe = probe || undefined;
+    auditAgent(req, a, 'network', probe ? 'Als Abfrage-Client freigegeben' : 'Abfrage-Client entfernt');
+    network.agentChanged(a.id);
+  }
   if (pve === null && a.pve) {
     delete a.pve;
     auditAgent(req, a, 'client', 'Proxmox-Zuordnung entfernt');
@@ -1269,6 +1276,11 @@ app.post('/api/agents/migrate', requireAdmin, wrap(async (req, res) => {
   res.json({ urls, results });
 }));
 
+// ---- Netzwerkgeräte (OPNsense, Switches ...) über Abfrage-Clients -----------
+const network = require('./network')({
+  app, store, conns, agentRequest, broadcast, audit, auditReq, requireAdmin, wrap, httpError, log, agentLabel, versionAtLeast, tunnels, closeTunnel,
+});
+
 app.post('/api/enroll/rotate', requireAdmin, (req, res) => {
   store.data.enrollKeys = [newEnrollKey()]; // alle bisherigen Schlüssel sofort ungültig
   store.save();
@@ -1485,6 +1497,8 @@ wssAgent.on('connection', (ws, req) => {
       log(`[agent] online: ${a.info?.hostname} (${clientIp(req)})`);
       audit.add({ cat: 'connection', action: 'Online', actor: 'Agent', ip: clientIp(req), agentId, target: agentLabel(a), detail: `Agent ${msg.version || '?'}` });
       broadcastAgent(agentId);
+      network.agentChanged(agentId);
+      network.agentOnline(agentId);
       return;
     }
     handleAgentMessage(agentId, msg);
@@ -1514,6 +1528,7 @@ wssAgent.on('connection', (ws, req) => {
       log(`[agent] offline: ${a.info?.hostname}`);
       audit.add({ cat: 'connection', action: 'Offline', actor: 'Agent', ip: clientIp(req), agentId, target: agentLabel(a) });
       broadcastAgent(agentId);
+      network.agentChanged(agentId);
     }
   });
 });
@@ -1577,7 +1592,7 @@ wssAdmin.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.on('pong', () => (ws.isAlive = true));
   admins.add(ws);
-  sendJson(ws, { type: 'hello', agents: Object.values(store.data.agents).map((a) => summarize(a, true)), settings: store.data.settings, folders: store.data.folders });
+  sendJson(ws, { type: 'hello', agents: Object.values(store.data.agents).map((a) => summarize(a, true)), settings: store.data.settings, folders: store.data.folders, net: network.list() });
 
   ws.on('message', async (raw) => {
     let msg;
