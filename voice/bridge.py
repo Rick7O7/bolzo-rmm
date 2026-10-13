@@ -3,7 +3,7 @@
 
 Meldet sich als IP-Telefon an der FRITZ!Box an. Ein Anruf läuft so ab:
   PIN per Tastatur -> Sprachbefehl -> Whisper (Sprache zu Text) -> Claude (Text zu Befehl)
-  -> Rückfrage per Taste 1 -> BOLZO RMM führt aus -> Antwort per Sprachausgabe (Piper).
+  -> Rückfrage per Taste 1 -> BOLZO RMM führt aus -> Antwort per Sprachausgabe (Azure, sonst Piper).
 
 Konfiguration über Umgebungsvariablen (siehe /etc/bolzo-voice/voice.env).
 Testen ohne Telefon:  bridge.py --test-text "Welche Server sind offline?"
@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import wave
+from xml.sax.saxutils import escape
 
 import anthropic
 import httpx
@@ -33,7 +34,7 @@ import numpy as np
 log = logging.getLogger("bolzo-voice")
 
 RATE = 8000          # Telefon-Abtastrate
-FRAME = 160          # 20 ms bei 8 kHz, 8 bit
+FRAME = 160          # 20 ms bei 8 kHz (Eingang: 8 bit, Ausgabe: 16 bit)
 VERBS = {"reboot": "neu starten", "shutdown": "herunterfahren", "wake": "aufwecken"}
 DONE = {"reboot": "wird neu gestartet", "shutdown": "wird heruntergefahren", "wake": "wird aufgeweckt"}
 # Schreibweise so, wie die Stimme es richtig ausspricht (am Telefon mit Spracherkennung geprüft)
@@ -92,6 +93,9 @@ def load_config():
         "piper_bin": e("PIPER_BIN", "/opt/bolzo-voice/piper/piper"),
         "piper_voice": e("PIPER_VOICE", "/opt/bolzo-voice/voices/de_DE-thorsten-medium.onnx"),
         "tts_cache": e("TTS_CACHE", "/opt/bolzo-voice/cache"),
+        "azure_key": e("AZURE_SPEECH_KEY", ""),
+        "azure_region": e("AZURE_SPEECH_REGION", ""),
+        "azure_voice": e("AZURE_VOICE", "") or "de-DE-ConradNeural",
         "lockout_file": e("LOCKOUT_FILE", "/opt/bolzo-voice/state/pin-fails.json"),
     }
     return cfg
@@ -108,14 +112,19 @@ def missing_config(cfg, need_phone=True):
 
 
 # ---------------------------------------------------------------------------
-# Audio-Helfer (Telefon-Audio: 8 kHz, 8 bit unsigned, mono)
+# Audio-Helfer (Telefon-Audio: 8 kHz mono; vom Anrufer 8 bit unsigned, zum Anrufer 16 bit)
 # ---------------------------------------------------------------------------
 def u8_to_float(b):
     return (np.frombuffer(b, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
 
 
-def float_to_u8(x):
-    return np.clip(x * 127.0 + 128.0, 0, 255).astype(np.uint8).tobytes()
+def float_to_s16(x):
+    return np.clip(x * 32767.0, -32768, 32767).astype("<i2").tobytes()
+
+
+def duration(audio):
+    """Länge von Ausgabe-Audio (16 bit, 8 kHz) in Sekunden."""
+    return len(audio) / (2 * RATE)
 
 
 def resample(x, src, dst):
@@ -129,7 +138,7 @@ def resample(x, src, dst):
 # Sprachausgabe
 # ---------------------------------------------------------------------------
 def to_phone(x, src_rate):
-    """Float-Audio (-1..1) -> Telefon-Audio (8 kHz, 8 bit unsigned) mit sauberem Tiefpass und Pegel."""
+    """Float-Audio (-1..1) -> Telefon-Audio (8 kHz, 16 bit) mit sauberem Tiefpass und Pegel."""
     x = np.asarray(x, dtype=np.float32)
     try:
         from scipy.signal import resample_poly
@@ -143,7 +152,7 @@ def to_phone(x, src_rate):
     peak = float(np.max(np.abs(out))) if len(out) else 0
     if peak > 1e-3:
         out = out * (0.8 / peak)
-    return float_to_u8(out) + bytes([128]) * (RATE // 5)  # 200 ms Pause danach
+    return float_to_s16(out) + bytes(2 * RATE // 5)  # 200 ms Pause danach
 
 
 def split_sentences(text, min_len=25):
@@ -179,14 +188,21 @@ class Tts:
     def _render(self, text):
         raise NotImplementedError
 
+    def chunks(self, text):
+        """In welchen Stücken eine Antwort erzeugt wird (siehe CallSession.say)."""
+        return split_sentences(text)
+
+    def cached(self, text):
+        return self.cache.get(text)
+
     def synth(self, text):
-        """Text -> Telefon-Audio (8 kHz, 8 bit)."""
+        """Text -> Telefon-Audio (8 kHz, 16 bit)."""
         if text in self.cache:
             return self.cache[text]
         path = None
         if self.cache_dir:
             key = hashlib.sha256(f"{self.name}\n{text}".encode("utf8")).hexdigest()[:32]
-            path = os.path.join(self.cache_dir, key + ".u8")
+            path = os.path.join(self.cache_dir, key + ".pcm")
             try:
                 with open(path, "rb") as f:
                     audio = f.read()
@@ -198,7 +214,7 @@ class Tts:
             t0 = time.time()
             x, rate = self._render(text)
         audio = to_phone(x, rate)
-        log.info("Sprachausgabe: %.1fs Audio in %.1fs erzeugt", len(audio) / RATE, time.time() - t0)
+        log.info("Sprachausgabe (%s): %.1fs Audio in %.1fs erzeugt", self.name, duration(audio), time.time() - t0)
         if len(self.cache) < 200:
             self.cache[text] = audio
         if path:
@@ -231,8 +247,80 @@ class PiperTts(Tts):
         return np.frombuffer(p.stdout, dtype="<i2").astype(np.float32) / 32768.0, self.rate
 
 
+class AzureTts(Tts):
+    """Natürliche Neural-Stimme von Microsoft Azure; liefert direkt Telefon-Audio (8 kHz, 16 bit)."""
+
+    def __init__(self, key, region, voice, cache_dir=None):
+        super().__init__(cache_dir)
+        self.voice = voice
+        self.name = "azure:" + voice
+        self.http = httpx.Client(
+            base_url=f"https://{region}.tts.speech.microsoft.com",
+            headers={"Ocp-Apim-Subscription-Key": key, "Content-Type": "application/ssml+xml",
+                     "X-Microsoft-OutputFormat": "raw-8khz-16bit-mono-pcm", "User-Agent": "bolzo-voice"},
+            timeout=httpx.Timeout(10, connect=3))
+
+    def chunks(self, text):
+        # Erster Satz einzeln (ist schnell da), der Rest in einem Stück: durchgehende Satzmelodie und
+        # weniger Anfragen (der kostenlose Tarif erlaubt 20 pro Minute)
+        parts = split_sentences(text)
+        return parts[:1] + ([" ".join(parts[1:])] if len(parts) > 1 else [])
+
+    def _render(self, text):
+        body = escape(text)
+        if "Multilingual" in self.voice:  # mehrsprachige Stimmen sollen nicht raten, sondern Deutsch sprechen
+            body = f'<lang xml:lang="de-DE">{body}</lang>'
+        voice = escape(self.voice, {'"': "&quot;"})
+        ssml = (f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="de-DE">'
+                f'<voice name="{voice}">{body}</voice></speak>')
+        r = self.http.post("/cognitiveservices/v1", content=ssml.encode("utf8"))
+        if r.status_code in (401, 403):
+            raise RuntimeError(f"HTTP {r.status_code}: AZURE_SPEECH_KEY oder AZURE_SPEECH_REGION falsch")
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+        if len(r.content) < 2:
+            raise RuntimeError("keine Audiodaten erhalten")
+        return np.frombuffer(r.content[: len(r.content) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0, RATE
+
+
+class FallbackTts:
+    """Cloud-Stimme mit Piper als Ersatz: Ist Azure nicht erreichbar, spricht 30 s lang Piper, dann neuer Versuch."""
+
+    def __init__(self, main, backup):
+        self.main, self.backup = main, backup
+        self.name = main.name
+        self.down_until = 0.0
+
+    def _up(self, text=None):
+        return time.time() >= self.down_until or text in self.main.cache
+
+    def chunks(self, text):
+        return (self.main if self._up() else self.backup).chunks(text)
+
+    def cached(self, text):
+        return self.main.cached(text) or self.backup.cached(text)
+
+    def synth(self, text):
+        if self._up(text):
+            try:
+                return self.main.synth(text)
+            except Exception as e:
+                self.down_until = time.time() + 30
+                log.warning("%s nicht verfügbar (%s) – Piper spricht", self.main.name, e)
+        return self.backup.synth(text)
+
+
 def make_tts(cfg):
-    return PiperTts(cfg["piper_bin"], cfg["piper_voice"], cfg["tts_cache"])
+    piper = PiperTts(cfg["piper_bin"], cfg["piper_voice"], cfg["tts_cache"])
+    if not cfg["azure_key"]:
+        log.info("Stimme: Piper (offline). Natürlicher klingt Azure, siehe AZURE_SPEECH_KEY in voice.env")
+        return piper
+    region = cfg["azure_region"].lower().replace(" ", "")  # "Germany West Central" -> germanywestcentral
+    if not region:
+        log.error("AZURE_SPEECH_REGION fehlt in voice.env – nehme Piper")
+        return piper
+    log.info("Stimme: %s (Azure, Region %s), Ersatz: Piper", cfg["azure_voice"], region)
+    return FallbackTts(AzureTts(cfg["azure_key"], region, cfg["azure_voice"], cfg["tts_cache"]), piper)
 
 
 # ---------------------------------------------------------------------------
@@ -825,7 +913,7 @@ class CallSession:
 
         def produce():
             try:
-                for part in split_sentences(text):
+                for part in self.app.tts.chunks(text):
                     q.put(self.app.tts.synth(part))
             except Exception:
                 log.exception("Sprachausgabe fehlgeschlagen")
@@ -850,13 +938,13 @@ class CallSession:
 
     def hint(self, text):
         """Kurze, vorab erzeugte Ansage abspielen, ohne zu warten (z.B. während Claude nachdenkt)."""
-        audio = self.app.tts.cache.get(text)
+        audio = self.app.tts.cached(text)
         if audio:
             self.queue_audio(audio)
 
     def queue_audio(self, audio):
-        self.call.write_audio(audio)  # pyVoIP hängt an bereits wartendes Audio an
-        self.out_end = max(self.out_end, time.time()) + len(audio) / RATE
+        self.call.write_audio(audio)  # wird an bereits wartendes Audio angehängt (siehe fix_pyvoip_send)
+        self.out_end = max(self.out_end, time.time()) + duration(audio)
 
     # --- Eingabe: Tasten ---
     def flush_dtmf(self):
@@ -1059,19 +1147,56 @@ def local_ip_towards(host, port):
 # ---------------------------------------------------------------------------
 # Start
 # ---------------------------------------------------------------------------
-def fix_pyvoip_pcma():
-    """pyVoIP 1.6.8 kodiert bei ausgehandeltem PCMA (A-law, Standard der FRITZ!Box) fälschlich als
-    PCMU (μ-law) – das klingt extrem übersteuert. Hier richtig nach Codec kodieren."""
+def fix_pyvoip_send():
+    """Das Senden von pyVoIP 1.6.8 ersetzen – dort klingt jede Stimme abgehackt und verwaschen:
+    - Audio geht als 8 bit linear (256 Stufen) in den Codec: leise Laute wie s, f, t, sch gehen im
+      Rauschen unter. Hier kommt 16-bit-Audio an und wird direkt nach G.711 kodiert – bei PCMA (A-law,
+      Standard der FRITZ!Box) auch wirklich als A-law (pyVoIP nimmt dort μ-law: extrem übersteuert).
+    - Pakete werden per sleep() relativ zum letzten getaktet: Jede Verzögerung (z.B. während der
+      nächste Satz erzeugt wird) bleibt als Lücke im Ton. Hier läuft der Takt nach fester Uhr und
+      holt kurze Verspätungen sofort auf."""
+    import audioop  # bringt pyVoIP mit (ab Python 3.13 über audioop-lts)
     from pyVoIP import RTP
 
-    def encode_packet(self, payload):
-        if self.preference == RTP.PayloadType.PCMA:
-            return self.encode_pcma(payload)
-        if self.preference == RTP.PayloadType.PCMU:
-            return self.encode_pcmu(payload)
-        raise RTP.RTPParseError("Unsupported codec (encode): " + str(self.preference))
+    codecs = {RTP.PayloadType.PCMA: (audioop.lin2alaw, b"\xd5"), RTP.PayloadType.PCMU: (audioop.lin2ulaw, b"\xff")}
+    orig_init = RTP.RTPClient.__init__
 
-    RTP.RTPClient.encode_packet = encode_packet
+    def init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        self.out_buf, self.out_lock = bytearray(), threading.Lock()
+
+    def write(self, data):
+        """data: 16 bit, 8 kHz, mono."""
+        encoded = codecs[self.preference][0](data, 2)
+        with self.out_lock:
+            self.out_buf += encoded
+
+    def trans(self):
+        silence = codecs[self.preference][1] * FRAME
+        next_at = time.monotonic()
+        while self.NSD:
+            with self.out_lock:
+                payload = bytes(self.out_buf[:FRAME])
+                del self.out_buf[:FRAME]
+            payload += silence[len(payload):]
+            header = (bytes([0x80, int(self.preference)]) + (self.outSequence & 0xFFFF).to_bytes(2, "big")
+                      + (self.outTimestamp & 0xFFFFFFFF).to_bytes(4, "big") + self.outSSRC.to_bytes(4, "big"))
+            try:
+                self.sout.sendto(header + payload, (self.outIP, self.outPort))
+            except OSError:
+                pass  # Socket nach dem Auflegen schon zu
+            self.outSequence += 1
+            self.outTimestamp += FRAME
+            next_at += FRAME / RATE
+            wait = next_at - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            elif wait < -0.2:
+                next_at = time.monotonic()  # lange hängen geblieben: nicht alles auf einmal nachschicken
+
+    RTP.RTPClient.__init__ = init
+    RTP.RTPClient.write = write
+    RTP.RTPClient.trans = trans
 
 
 def fix_pyvoip_dtmf():
@@ -1127,7 +1252,7 @@ def fix_pyvoip_sip_source():
 def run_phone(cfg):
     from pyVoIP.VoIP import VoIPPhone
 
-    fix_pyvoip_pcma()
+    fix_pyvoip_send()
     fix_pyvoip_dtmf()
     fix_pyvoip_sip_source()
     if len(cfg["pin"]) < 6:
@@ -1193,13 +1318,13 @@ def run_text_test(cfg, text):
 def run_tts_test(cfg, text, out):
     tts = make_tts(cfg)
     t0 = time.time()
-    audio = b"".join(tts.synth(p) for p in split_sentences(text))
+    audio = b"".join(tts.synth(p) for p in tts.chunks(text))
     with wave.open(out, "wb") as w:
         w.setnchannels(1)
-        w.setsampwidth(1)
+        w.setsampwidth(2)
         w.setframerate(RATE)
         w.writeframes(audio)
-    print(f"Telefon-Audio geschrieben: {out} ({len(audio) / RATE:.1f}s Audio in {time.time() - t0:.1f}s erzeugt)")
+    print(f"Telefon-Audio geschrieben: {out} ({duration(audio):.1f}s Audio in {time.time() - t0:.1f}s erzeugt)")
 
 
 def main():

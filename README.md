@@ -174,6 +174,12 @@ diktierte Befehle gibt es am Telefon nie.
 4. `/etc/bolzo-voice/voice.env` ausfüllen (FRITZ!Box-Zugang, `RMM_TOKEN`, eigener
    `ANTHROPIC_API_KEY` von console.anthropic.com, `PIN`), dann `systemctl restart bolzo-voice`.
    Logs: `journalctl -u bolzo-voice -f`.
+5. **Natürliche Stimme (empfohlen):** Ohne weitere Einstellung spricht die Offline-Stimme Piper, die
+   deutlich künstlich klingt. Dafür im [Azure-Portal](https://portal.azure.com) einen „Speech service“ mit
+   dem Tarif „Free F0“ anlegen (500.000 Zeichen im Monat kostenlos, das reicht locker). Unter „Schlüssel
+   und Endpunkt“ Schlüssel 1 und Region als `AZURE_SPEECH_KEY` und `AZURE_SPEECH_REGION` in `voice.env`
+   eintragen. Die Stimme wählt `AZURE_VOICE` (Standard `de-DE-ConradNeural`). Ist Azure nicht erreichbar,
+   spricht automatisch Piper.
 
 ## Sicherheit
 
