@@ -67,6 +67,11 @@ const ICONS = {
   firewall: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9.3h18M3 14.7h18M9 4v5.3M15 9.3v5.4M9 14.7V20"/>',
   ethernet: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 14v-2M10 14v-2M14 14v-2M18 14v-2"/>',
   radar: '<path d="M19.07 4.93A10 10 0 1 0 22 12"/><path d="M16.24 7.76A6 6 0 1 0 18 12"/><circle cx="12" cy="12" r="2"/><path d="m13.4 10.6 6.1-6.1"/>',
+  tv: '<rect x="2" y="7" width="20" height="15" rx="2"/><path d="m17 2-5 5-5-5"/>',
+  router: '<rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 18h.01M10 18h.01M15 10v4M17.84 7.17a4 4 0 0 0-5.66 0M20.66 4.34a8 8 0 0 0-11.31 0"/>',
+  film: '<rect x="2" y="2" width="20" height="20" rx="2.2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/>',
+  music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.9.6 2.8.7a2 2 0 0 1 1.7 2z"/>',
   external: '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   pause: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
   arrows: '<path d="M7 17V3M3 7l4-4 4 4M17 7v14M21 17l-4 4-4-4"/>',
@@ -325,7 +330,11 @@ export const osShort = (a) => osName(a)
   .replace(/\s*\([a-z]+\)$/i, '');
 // "Container 107 · PROX" für zugeordnete Gäste (als schlichte Textzeile)
 export const pveLine = (a) => (a?.pve ? `${icon('server')}${a.pve.type === 'lxc' ? 'Container' : 'VM'} ${a.pve.vmid} · ${esc(a.pve.hostName)}` : '');
-export const clientIcon = (a) => (isPveHost(a) ? icon('server') : osIcon(a.platform));
+// Eigenes Symbol/Farbe (Client → „Symbol & Tags“), sonst automatisch nach Betriebssystem
+export const clientIcon = (a) => {
+  const svg = a?.icon && ICONS[a.icon] ? icon(a.icon) : isPveHost(a) ? icon('server') : osIcon(a?.platform);
+  return /^#[0-9a-f]{6}$/i.test(a?.color || '') ? `<span class="c-ic" style="color:${a.color}">${svg}</span>` : svg;
+};
 export function pveBadge(a, { small = false } = {}) {
   if (a?.pve) return `<span class="pve-badge guest ${small ? 'sm' : ''}" title="Läuft auf ${esc(a.pve.hostName)}">${a.pve.type === 'lxc' ? 'CT' : 'VM'} ${a.pve.vmid} · ${esc(a.pve.hostName)}</span>`;
   return '';

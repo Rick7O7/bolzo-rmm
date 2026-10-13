@@ -9,6 +9,7 @@ import { showRunResult, renderAuditLog } from './history.js';
 import { assignDialog, openConsole, pvePower, renderProxmoxHost } from '../proxmox.js';
 import { renderFiles } from '../files.js';
 import { moveMenu, folderById, folderPath } from '../folders.js';
+import { clientStyleDialog } from '../clientstyle.js';
 
 const TABS = [
   { key: 'overview', label: 'Übersicht', icon: 'activity' },
@@ -48,7 +49,7 @@ export function renderClient(root, { go, params }) {
     if (!a) return;
     const head = $('[data-head]', root);
     head.innerHTML = `
-      <div class="detail-icon client">${clientIcon(a)}</div>
+      <button class="detail-icon client" data-style title="Symbol &amp; Tags ändern">${clientIcon(a)}</button>
       <div class="detail-title grow">
         <div class="page-kind client">${icon('monitor', 'sm')}BOLZO-Client<span>Agent im Betriebssystem</span>
           ${a.pve ? `<a href="#/guest/${a.pve.hostId}/${a.pve.type}/${a.pve.vmid}" class="kind-switch pve" title="Proxmox-Seite: Hardware, Netzwerk, Snapshots, Backups">${icon('server', 'sm')}Proxmox-${a.pve.type === 'lxc' ? 'Container' : 'VM'} öffnen</a>` : ''}</div>
@@ -66,6 +67,7 @@ export function renderClient(root, { go, params }) {
         <button class="btn icon-only" data-act="more" title="Weitere Aktionen">⋯</button>
       </div>`;
     $('[data-rename]', head).onclick = rename;
+    $('[data-style]', head).onclick = () => clientStyleDialog(id);
     $$('[data-act]', head).forEach((b) => (b.onclick = (e) => action(b.dataset.act, e)));
   }
 
@@ -103,6 +105,7 @@ export function renderClient(root, { go, params }) {
     const a = agent();
     const items = [
       { k: 'rename', label: 'Umbenennen', icon: 'edit' },
+      { k: 'style', label: 'Symbol & Tags', icon: 'tag' },
       { k: 'folder', label: a.folderId && folderById(a.folderId) ? `Ordner: ${folderPath(a.folderId)}` : 'In Ordner verschieben', icon: 'folder' },
       ...(a.info?.proxmox ? [] : [{ k: 'pve', label: a.pve ? 'Proxmox-Zuordnung ändern' : 'Proxmox-VM zuordnen', icon: 'server' }]),
       ...(a.pve ? [{ k: 'pve-page', label: 'Proxmox-Details öffnen', icon: 'server' }] : []),
@@ -129,6 +132,7 @@ export function renderClient(root, { go, params }) {
       close();
       try {
         if (k === 'rename') return rename();
+        if (k === 'style') return clientStyleDialog(id);
         if (k === 'folder') return moveMenu(anchor, [a.id]);
         if (k === 'pve') return assignDialog(a);
         if (k === 'pve-page') return go(`#/guest/${a.pve.hostId}/${a.pve.type}/${a.pve.vmid}`);

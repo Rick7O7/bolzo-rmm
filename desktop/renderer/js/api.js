@@ -199,6 +199,9 @@ class Api extends EventTarget {
       case 'jobs':
         this.emit('jobs');
         break;
+      case 'voice':
+        this.emit('voice', msg);
+        break;
       case 'folders':
         this.folders = msg.folders || [];
         this.emit('folders');

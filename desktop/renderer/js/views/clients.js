@@ -10,6 +10,7 @@ import { addClientDialog } from './settings.js';
 import { runScriptDialog } from './scripts.js';
 import { openConsole } from '../proxmox.js';
 import { renderFolderTree, subtreeIds, folderById, folderPath, moveMenu, folderIcon } from '../folders.js';
+import { clientStyleDialog } from '../clientstyle.js';
 
 const COLS = [
   { key: 'name', label: 'Name', get: (a) => a.name.toLowerCase() },
@@ -148,7 +149,7 @@ export function renderClients(root, { go }) {
     panel.hidden = false;
     $('.cl-layout', root).classList.add('with-panel');
     panel.innerHTML = `
-      <div class="cp-head"><span class="cp-ic" data-ic></span><div class="grow"><div class="cp-name" data-name></div><div class="cp-state" data-state-line></div></div>
+      <div class="cp-head"><button class="cp-ic" data-ic data-act="style" title="Symbol &amp; Tags ändern"></button><div class="grow"><div class="cp-name" data-name></div><div class="cp-state" data-state-line></div></div>
         <button class="btn ghost sm icon-only" data-close title="Schließen">${icon('x', 'sm')}</button></div>
       <div class="cp-actions" data-actions></div>
       <div class="w cp-chart"><div class="wh">Auslastung · letzte Stunde</div><div data-chart></div></div>
@@ -204,7 +205,7 @@ export function renderClients(root, { go }) {
         ...(disk ? [[`Datenträger ${esc(disk.mount)}`, bar(disk.pct, t.disk)]] : []),
       ] : []),
       ['Ordner', `<button class="linkbtn" data-act="move">${folderIcon(folderById(a.folderId))}${a.folderId && folderById(a.folderId) ? esc(folderPath(a.folderId)) : 'ohne Ordner'}</button>`],
-      ['Tags', (a.tags || []).map((x) => tagHtml(x, { small: true })).join(' ') || '<span class="muted">–</span>'],
+      ['Tags', `<button class="linkbtn" data-act="style" title="Symbol &amp; Tags ändern">${(a.tags || []).map((x) => tagHtml(x, { small: true })).join(' ') || '<span class="muted">hinzufügen</span>'}</button>`],
       ['Agent', `${esc(a.version || '–')}${a.outdated ? ' <span class="badge warning">veraltet</span>' : ''}`],
     ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('');
   }
@@ -213,6 +214,7 @@ export function renderClients(root, { go }) {
     if (!a) return;
     try {
       if (kind === 'move') return moveMenu(btn, [a.id]);
+      if (kind === 'style') return clientStyleDialog(a.id);
       if (kind === 'terminal') return go(`#/client/${a.id}/terminal`);
       if (kind === 'console') return openConsole({ hostId: a.pve.hostId, vmid: a.pve.vmid, type: a.pve.type, name: a.name, label: a.name, hostName: a.pve.hostName });
       if (kind === 'wake') {

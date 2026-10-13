@@ -93,6 +93,8 @@ function summarize(a, withSpark = false) {
     os: a.info?.os || '',
     info: a.info || {},
     tags: a.tags || [],
+    icon: a.icon || '',
+    color: a.color || '',
     notes: a.notes || '',
     version: a.version || '',
     outdated: agentOutdated(a),
@@ -101,6 +103,7 @@ function summarize(a, withSpark = false) {
     pve: a.pve ? { ...a.pve, hostName: agentLabel(store.data.agents[a.pve.hostId]) || '?', hostOnline: conns.has(a.pve.hostId) } : null,
     probe: !!a.probe,
     folderId: a.folderId || null,
+    voiceBusy: voiceRuns.has(a.id), // Sprachsteuerung wird gerade installiert/aktualisiert
     createdAt: a.createdAt,
     lastSeen: online ? Date.now() : a.lastSeen,
     online,
@@ -369,8 +372,8 @@ app.get('/api/stats/history', requireAdmin, (req, res) => {
 
 app.patch('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
   const a = getAgent(req);
-  const { name, tags, notes, pve, probe } = req.body || {};
-  const before = { label: agentLabel(a), tags: a.tags || [], notes: a.notes || '' };
+  const { name, tags, notes, pve, probe, icon: ic, color } = req.body || {};
+  const before = { label: agentLabel(a), tags: a.tags || [], notes: a.notes || '', look: `${a.icon || ''}${a.color || ''}` };
   // Abfrage-Client: fragt OPNsense, Switches und andere Netzwerkgeräte ab (siehe network.js)
   if (typeof probe === 'boolean' && probe !== !!a.probe) {
     a.probe = probe || undefined;
@@ -395,7 +398,11 @@ app.patch('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
   if (typeof name === 'string') a.name = name.trim().slice(0, 80) || undefined;
   if (Array.isArray(tags)) a.tags = [...new Set(tags.map((t) => String(t).trim().slice(0, 32)).filter(Boolean))].slice(0, 20);
   if (typeof notes === 'string') a.notes = notes.slice(0, 20000);
+  // Eigenes Symbol (Name aus dem Symbolsatz der App) und Farbe; leer = automatisch nach Betriebssystem
+  if (typeof ic === 'string') a.icon = /^[a-zA-Z]{1,24}$/.test(ic) ? ic : undefined;
+  if (typeof color === 'string') a.color = /^#[0-9a-fA-F]{6}$/.test(color) ? color : undefined;
   store.save();
+  if (`${a.icon || ''}${a.color || ''}` !== before.look) auditAgent(req, a, 'client', 'Symbol geändert', { detail: [a.icon || 'automatisch', a.color].filter(Boolean).join(', ') });
   if (agentLabel(a) !== before.label) auditAgent(req, a, 'client', 'Umbenannt', { detail: `${before.label} → ${agentLabel(a)}` });
   const added = (a.tags || []).filter((t) => !before.tags.includes(t));
   const removed = before.tags.filter((t) => !(a.tags || []).includes(t));
@@ -1195,6 +1202,44 @@ app.post('/api/update/agents', requireAdmin, wrap(async (req, res) => {
   const ids = [...conns.keys()].filter((id) => store.data.agents[id] && agentOutdated(store.data.agents[id]));
   const results = await Promise.allSettled(ids.map((id) => updateAgent(id, 'manuell', req)));
   res.json({ requested: ids.length, ok: results.filter((r) => r.status === 'fulfilled').length });
+}));
+
+// Sprachsteuerung (voice/install-voice.sh) auf einem Linux-Client mit Agent installieren oder
+// aktualisieren – dasselbe Skript, die Konfiguration in /etc/bolzo-voice/voice.env bleibt erhalten.
+// Dauert beim ersten Mal mehrere Minuten: Antwort sofort, Ergebnis per WebSocket und im Verlauf.
+const voiceRuns = new Set();
+app.post('/api/agents/:id/voice-install', requireAdmin, wrap(async (req, res) => {
+  const a = getAgent(req);
+  if (!conns.has(a.id)) throw httpError(409, 'Client ist offline');
+  if (a.info?.platform !== 'linux') throw httpError(400, 'Die Sprachsteuerung läuft nur unter Linux');
+  if (voiceRuns.has(a.id)) throw httpError(409, 'Läuft bereits');
+  const update = !!a.info?.voice;
+  const script = {
+    name: update ? 'Sprachsteuerung aktualisieren' : 'Sprachsteuerung installieren', shell: 'bash', timeout: 3600,
+    body: [
+      'set -o pipefail',
+      'command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl; }',
+      // Farbcodes des Skripts entfernen, damit die Ausgabe im Verlauf lesbar bleibt
+      `curl -fsSL https://raw.githubusercontent.com/${REPO}/main/voice/install-voice.sh | bash 2>&1 | sed -u 's/\\x1b\\[[0-9;]*m//g'`,
+    ].join('\n'),
+  };
+  voiceRuns.add(a.id);
+  broadcastAgent(a.id);
+  log(`[voice] ${script.name} auf ${agentLabel(a)}`);
+  runOn(a.id, script, req)
+    .then(async (r) => {
+      try { // installiert / läuft? neu abfragen
+        a.info = await agentRequest(a.id, 'info');
+        store.save();
+      } catch {}
+      broadcast({ type: 'voice', id: a.id, name: agentLabel(a), update, ok: !r.error && !r.timedOut && r.exitCode === 0, result: r.error || (r.timedOut ? 'Zeitüberschreitung' : `Exit ${r.exitCode}`) });
+    })
+    .catch(() => {})
+    .finally(() => {
+      voiceRuns.delete(a.id);
+      broadcastAgent(a.id);
+    });
+  res.json({ ok: true, started: true });
 }));
 
 // Adresse, unter der dieser Request den Server erreicht hat

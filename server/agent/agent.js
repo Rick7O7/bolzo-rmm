@@ -122,8 +122,18 @@ async function getStaticInfo() {
   return staticInfo;
 }
 
+// Sprachsteuerung (voice/install-voice.sh) auf diesem Gerät? Die App bietet dann "aktualisieren" an.
+async function voiceInfo() {
+  if (IS_WIN) return null;
+  let st;
+  try { st = fs.statSync('/opt/bolzo-voice/bridge.py'); } catch { return null; }
+  const r = await exec('systemctl', ['is-active', 'bolzo-voice'], { timeout: 5000 });
+  return { installedAt: Math.round(st.mtimeMs), active: r.stdout.trim() === 'active' };
+}
+
 async function getInfo() {
   const s = await getStaticInfo();
+  const voice = await voiceInfo();
   const cpus = os.cpus();
   return {
     hostname: os.hostname(),
@@ -140,6 +150,7 @@ async function getInfo() {
     agentVersion: VERSION,
     nodeVersion: process.version,
     ...(s.proxmox ? { proxmox: s.proxmox } : {}),
+    ...(voice ? { voice } : {}),
   };
 }
 

@@ -31,7 +31,8 @@ Ports geöffnet werden, und sie funktionieren auch hinter NAT.
   jeden Eintrag an `/var/lib/bolzo-rmm/audit.jsonl` an; aus der App lässt sich das Protokoll nicht löschen.
   Terminal-Eingaben werden bewusst nicht mitgeschrieben (darin können Passwörter stehen).
 - **Skript-Ausgaben** der letzten 300 Ausführungen inkl. Ausgabe und Exit-Code
-- **Tags, Notizen, Umbenennen** pro Client
+- **Tags, Notizen, Umbenennen** pro Client, dazu ein **eigenes Symbol mit Farbe** (Klick aufs Symbol
+  oder ⋯ → „Symbol & Tags"; vorhandene Tags lassen sich dort mit einem Klick übernehmen)
 - **Warnschwellen** für CPU/RAM/Disk und **Windows-Benachrichtigungen**, wenn ein Client offline geht
 - **Install-Einzeiler** für neue Clients (Linux + Windows) direkt aus der App kopierbar
 - Agent **aktualisieren** oder **deinstallieren** per Klick
@@ -118,6 +119,8 @@ bereit, erscheint unten in der Seitenleiste „Update verfügbar".
   `/var/lib/bolzo-rmm/update.log`.
 - **Agents:** erkennen veralteten Code per Fingerabdruck und aktualisieren sich nach einem
   Server-Update automatisch (abschaltbar), oder per Klick „Alle Agents aktualisieren".
+- **Sprachsteuerung:** läuft auf dem Gerät mit dem BOLZO-Agent → „Aktualisieren" führt dort
+  `install-voice.sh` aus (oder „Hier installieren" auf einem Linux-Client). `voice.env` bleibt erhalten.
 
 **Neue Version veröffentlichen (Entwicklung):**
 
@@ -214,6 +217,9 @@ diktierte Befehle gibt es am Telefon nie.
    ```bash
    curl -fsSL https://raw.githubusercontent.com/Rick7O7/bolzo-rmm/main/voice/install-voice.sh | sudo bash
    ```
+
+   Läuft auf dem Gerät schon der BOLZO-Agent, geht das auch aus der App: **Einstellungen → Updates →
+   Sprachsteuerung → Hier installieren**. Spätere Updates ebenfalls dort per „Aktualisieren".
 
 4. `/etc/bolzo-voice/voice.env` ausfüllen (FRITZ!Box-Zugang, `RMM_TOKEN`, eigener
    `ANTHROPIC_API_KEY` von console.anthropic.com, `PIN`), dann `systemctl restart bolzo-voice`.

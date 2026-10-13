@@ -48,6 +48,10 @@ export async function initUpdates() {
     clearTimeout(updates._t);
     updates._t = setTimeout(() => updates.refreshServer(), 4000);
   });
+  // Sprachsteuerung fertig installiert/aktualisiert (dauert Minuten – Meldung egal, wo man gerade ist)
+  api.on('voice', (m) => toast(m.ok
+    ? `Sprachsteuerung auf ${m.name} ${m.update ? 'aktualisiert' : 'installiert'}`
+    : `Sprachsteuerung auf ${m.name}: ${m.result} – Ausgabe unter Verlauf → Skript-Ausgaben`, m.ok ? 'ok' : 'err'));
 }
 
 const fmtDate = (d) => (d ? new Date(d).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : '');
@@ -147,7 +151,10 @@ export function renderUpdateCard(box) {
         <div><div class="os-head" style="margin-bottom:8px">${icon('monitor', 'sm')}Dashboard-App ${updates.appVersion ? `<span class="muted" style="font-weight:400">· Version ${esc(updates.appVersion)}</span>` : ''}</div>${appRow}</div>
         <div style="border-top:1px solid var(--border);padding-top:16px"><div class="os-head" style="margin-bottom:8px">${icon('server', 'sm')}Server</div>${serverRow}</div>
         <div style="border-top:1px solid var(--border);padding-top:16px"><div class="os-head" style="margin-bottom:8px">${icon('network', 'sm')}Agents</div>${agentRow}</div>
+        <div style="border-top:1px solid var(--border);padding-top:16px"><div class="os-head" style="margin-bottom:8px">${icon('bell', 'sm')}Sprachsteuerung (Telefon)</div><div data-voicebox></div></div>
       </div>`;
+    lastVoice = '';
+    drawVoice();
 
     $('[data-appcheck]', box)?.addEventListener('click', () => desk.update.check());
     $('[data-appinstall]', box)?.addEventListener('click', () => desk.update.install());
@@ -158,8 +165,56 @@ export function renderUpdateCard(box) {
     });
   }
 
+  // Sprachsteuerung: läuft auf einem Linux-Client mit Agent. Der Agent meldet, ob sie installiert ist;
+  // installieren und aktualisieren ist dasselbe Skript (voice.env bleibt erhalten).
+  let lastVoice = '';
+  function drawVoice() {
+    const vb = $('[data-voicebox]', box);
+    if (!vb) return;
+    const all = [...api.agents.values()];
+    const hosts = all.filter((a) => a.info?.voice || a.voiceBusy).sort((a, b) => a.name.localeCompare(b.name));
+    const candidates = all.filter((a) => a.online && a.platform === 'linux' && !a.info?.voice).sort((a, b) => a.name.localeCompare(b.name));
+    const state = (a) => (a.voiceBusy ? `<span class="status"><span class="dot alert"></span>${a.info?.voice ? 'Update' : 'Installation'} läuft ... (einige Minuten)</span>`
+      : !a.online ? '<span class="badge">Client offline</span>'
+      : a.info.voice.active ? `<span class="badge good">${icon('check')}Läuft</span>`
+      : `<span class="badge warning">${icon('alert')}Gestoppt – voice.env ausgefüllt?</span>`);
+    const html = `
+      ${hosts.map((a) => `<div class="row" style="margin-bottom:8px">
+          <div class="grow"><b>${esc(a.name)}</b> ${state(a)}${a.info?.voice?.installedAt ? ` <span class="muted" style="font-size:12px">· Stand ${esc(fmtDate(a.info.voice.installedAt))}</span>` : ''}</div>
+          <button class="btn" data-voice="${a.id}" ${a.online && !a.voiceBusy ? '' : 'disabled'}>${icon('download', 'sm')}Aktualisieren</button></div>`).join('')}
+      ${hosts.length ? '' : '<div class="muted" style="margin-bottom:8px">Auf keinem Client installiert.</div>'}
+      ${candidates.length ? `<div class="row" style="flex-wrap:wrap">
+          <select class="select" data-voicetarget style="max-width:260px">${candidates.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>
+          <button class="btn" data-voiceinstall>${icon('plus', 'sm')}${hosts.length ? 'Auch hier installieren' : 'Hier installieren'}</button></div>` : ''}
+      <div class="hint muted" style="margin-top:8px;font-size:12.5px">Holt die neueste Version von GitHub (wie <span class="mono">install-voice.sh</span>). Die Einstellungen in <span class="mono">/etc/bolzo-voice/voice.env</span> bleiben erhalten – nach einer Neuinstallation dort im Terminal des Clients FRITZ!Box-Zugang, Schlüssel und PIN eintragen.</div>`;
+    if (html === lastVoice) return; // Metriken kommen alle paar Sekunden – Auswahl nicht zurücksetzen
+    const picked = $('[data-voicetarget]', vb)?.value;
+    lastVoice = html;
+    vb.innerHTML = html;
+    if (picked && $(`[data-voicetarget] option[value="${picked}"]`, vb)) $('[data-voicetarget]', vb).value = picked;
+    vb.querySelectorAll('[data-voice]').forEach((b) => (b.onclick = () => voiceRun(api.agents.get(b.dataset.voice))));
+    $('[data-voiceinstall]', vb)?.addEventListener('click', () => voiceRun(api.agents.get($('[data-voicetarget]', vb).value)));
+  }
+
+  async function voiceRun(a) {
+    if (!a) return;
+    const update = !!a.info?.voice;
+    if (!(await confirmDialog({
+      title: update ? 'Sprachsteuerung aktualisieren?' : 'Sprachsteuerung installieren?',
+      text: update
+        ? `${esc(a.name)} lädt die neueste Version von GitHub und startet die Sprachsteuerung neu. Ein laufender Anruf wird dabei beendet.`
+        : `Auf ${esc(a.name)} werden Python, Spracherkennung und Stimme installiert (beim ersten Mal 5–15 Minuten). Danach die Zugangsdaten in /etc/bolzo-voice/voice.env eintragen.`,
+      okText: update ? 'Aktualisieren' : 'Installieren',
+    }))) return;
+    try {
+      await api.post(`/api/agents/${a.id}/voice-install`);
+      toast(update ? 'Update der Sprachsteuerung gestartet' : 'Installation der Sprachsteuerung gestartet');
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
   draw();
   const off = updates.on(draw);
+  const offAgents = api.on('agents', drawVoice);
   updates.refreshServer(true).then(() => { if (updates.server?.updating) startPolling(); });
-  return () => { off(); clearInterval(pollTimer); };
+  return () => { off(); offAgents(); clearInterval(pollTimer); };
 }
