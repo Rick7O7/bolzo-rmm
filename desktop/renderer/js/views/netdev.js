@@ -548,6 +548,7 @@ export function renderNetDevice(root, { go, params }) {
           <div class="k">VLANs</div><div class="v">${data.vlans.length || dash}</div>
           <div class="k">Läuft seit</div><div class="v">${data.uptime != null ? fmtDuration(data.uptime) : '–'}</div>
           <div class="k">Ändern</div><div class="v">${data.write ? '<span class="badge good">Schreibzugriff</span>' : '<span class="muted">nur lesen – Schreib-Community fehlt</span>'}</div>
+          <div class="k">Stand</div><div class="v">${new Date(Math.max(data.liveTs || 0, data.ts)).toLocaleTimeString('de-DE')}${data.cached ? ' <span class="muted">(gespeichert, wird aktualisiert)</span>' : ''}</div>
         </div><div class="nd-side-hint">${icon('chevron', 'sm')}Port anklicken für Details und Aktionen</div>`;
         return;
       }
@@ -631,9 +632,14 @@ export function renderNetDevice(root, { go, params }) {
       if (c) select(Number(c.dataset.if));
     });
 
-    async function loadFull() {
+    // maxAge: gespeicherten Stand vom Server nehmen, wenn er nicht älter ist (zeigt die Seite sofort)
+    async function loadFull(maxAge = 0) {
+      const slow = setTimeout(() => {
+        const fr = $('[data-front] .muted', body);
+        if (fr && !data) fr.textContent = 'Der Switch antwortet langsam – Ports werden geladen ...';
+      }, 3000);
       try {
-        data = await call(d, 'snmp.ports');
+        data = await call(d, 'snmp.ports', maxAge ? { maxAge } : {});
         drawAll();
       } catch (e) {
         if (!data) {
@@ -641,22 +647,37 @@ export function renderNetDevice(root, { go, params }) {
           const fr = $('[data-front]', body);
           if (fr) fr.remove();
         } else toast(e.message, 'err');
+      } finally {
+        clearTimeout(slow);
       }
     }
-    // Zwischendurch nur Zähler und Zustand – schneller und schont alte Switches
+    // Zwischendurch nur Zustand und Zähler. Der Abstand richtet sich nach dem Switch: wer für die
+    // Antwort lange braucht, wird seltener gefragt (mindestens 10 s, sonst das Vierfache der Antwortzeit).
+    let liveTimer = null;
+    let stopped = false;
     async function loadLive() {
-      if (!data) return;
-      try {
-        const r = await call(d, 'snmp.ports', { live: true });
-        const m = new Map(r.ports.map((x) => [x.ifIndex, x]));
-        data.ports = data.ports.map((p) => ({ ...p, ...(m.get(p.ifIndex) || {}) }));
-        drawAll();
-      } catch {}
+      const t0 = Date.now();
+      if (data && !document.hidden) {
+        try {
+          const r = await call(d, 'snmp.ports', { live: true });
+          const m = new Map(r.ports.map((x) => [x.ifIndex, x]));
+          data.ports = data.ports.map((p) => ({ ...p, ...(m.get(p.ifIndex) || {}) }));
+          data.liveTs = r.ts;
+          drawAll();
+        } catch {}
+      }
+      if (!stopped) liveTimer = setTimeout(loadLive, Math.max(10000, 4 * (Date.now() - t0)));
     }
-    loadFull();
-    const s1 = poll(loadLive, 10000);
-    const s2 = poll(loadFull, 60000);
-    return () => { s1(); s2(); };
+    loadFull(10 * 60e3).then(() => {
+      if (stopped) return;
+      // Gespeicherter Stand: gleich frische Zustände holen, ganz neu laden, wenn er älter als 1 min ist
+      if (data?.cached) {
+        loadLive();
+        if (Date.now() - data.ts > 60e3) loadFull();
+      } else liveTimer = setTimeout(loadLive, 10000);
+    });
+    const s2 = poll(() => loadFull(), 60000);
+    return () => { stopped = true; clearTimeout(liveTimer); s2(); };
   }
 
   function switchMacs(body, d) {
@@ -678,7 +699,7 @@ export function renderNetDevice(root, { go, params }) {
     }
     async function load() {
       try {
-        const r = await call(d, 'snmp.ports');
+        const r = await call(d, 'snmp.ports', { maxAge: 60e3 });
         rows = r.ports.filter((p) => !p.uplink || p.probe).flatMap((p) => p.macs.map((m) => ({ ...m, port: portLabel(p), ifIndex: p.ifIndex })))
           .sort((a, b) => (a.ip ? 0 : 1) - (b.ip ? 0 : 1) || ipKey(a.ip).localeCompare(ipKey(b.ip)) || a.mac.localeCompare(b.mac));
         draw();
@@ -699,7 +720,7 @@ export function renderNetDevice(root, { go, params }) {
 
   function switchVlans(body, d) {
     body.innerHTML = '<div class="card empty">Lade ...</div>';
-    call(d, 'snmp.ports').then((r) => {
+    call(d, 'snmp.ports', { maxAge: 5 * 60e3 }).then((r) => {
       const ports = r.ports.filter((p) => p.phys || d.kind !== 'switch');
       const vids = [...new Set([...r.vlans.map((v) => v.vid), ...ports.flatMap((p) => [...p.untagged, ...p.tagged])])].sort((a, b) => a - b);
       const nm = (vid) => r.vlans.find((v) => v.vid === vid)?.name || '';

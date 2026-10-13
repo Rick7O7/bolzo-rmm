@@ -11,7 +11,7 @@ const net = require('net');
 const tls = require('tls');
 const http = require('http');
 
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -1430,7 +1430,8 @@ class SnmpSession {
     let r;
     for (let attempt = 0; ; attempt++) {
       try {
-        r = await this._send(pdu, varbinds, a, b, 2500);
+        // Zweiter Versuch mit mehr Geduld: langsame Switches (z.B. HP 1810G) brauchen unter Last länger
+        r = await this._send(pdu, varbinds, a, b, attempt ? 6000 : 2500);
         break;
       } catch (e) {
         if (!e.timeout || attempt >= 1) throw e;
@@ -1444,13 +1445,14 @@ class SnmpSession {
   }
   get(oids) { return this.request(PDU.get, oids.map((oid) => ({ oid }))); }
   set(varbinds) { return this.request(PDU.set, varbinds); }
-  // Teilbaum lesen (GETBULK bei v2c, sonst GETNEXT); liefert [Index relativ zur Basis, Typ, Wert]
-  async walk(base, max = 5000) {
+  // Teilbaum lesen (GETBULK bei v2c, sonst GETNEXT); liefert [Index relativ zur Basis, Typ, Wert].
+  // reps klein halten: einfache Switches brauchen für große Blöcke überproportional lange
+  // (HP 1810G: 5 Werte 50 ms, 25 Werte 630 ms).
+  async walk(base, max = 5000, reps = 10) {
     base = String(base).replace(/^\./, '');
     const prefix = `${base}.`;
     const out = [];
     let cur = base;
-    let reps = 25;
     while (out.length < max) {
       let vbs;
       try {
@@ -1481,7 +1483,7 @@ async function netSnmp({ snmp, ops }) {
     for (const op of (Array.isArray(ops) ? ops : []).slice(0, 60)) {
       try {
         if (op.op === 'get') results.push({ ok: true, data: await s.get((op.oids || []).slice(0, 60)) });
-        else if (op.op === 'walk') results.push({ ok: true, data: await s.walk(op.oid, Math.min(Number(op.max) || 5000, 20000)) });
+        else if (op.op === 'walk') results.push({ ok: true, data: await s.walk(op.oid, Math.min(Number(op.max) || 5000, 20000), Math.min(Math.max(Number(op.reps) || 10, 1), 50)) });
         else if (op.op === 'set') results.push({ ok: true, data: await s.set((op.varbinds || []).slice(0, 20)) });
         else if (op.op === 'sleep') { await sleep(Math.min(Number(op.ms) || 1000, 15000)); results.push({ ok: true }); }
         else results.push({ ok: false, error: 'Unbekannte SNMP-Operation' });

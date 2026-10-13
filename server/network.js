@@ -31,9 +31,6 @@ const IF_STATUS = { 1: 'up', 2: 'down', 3: 'testing', 4: 'unknown', 5: 'dormant'
 const POE_STATUS = { 1: 'disabled', 2: 'searching', 3: 'delivering', 4: 'fault', 5: 'test', 6: 'otherFault' };
 // Physische Ports: ethernetCsmacd, fastEther, fastEtherFX, gigabitEthernet
 const PHYS_TYPES = new Set([6, 62, 69, 117]);
-// Spalten der Port-Tabelle, die sich ständig ändern (Zähler, Zustand) – für die schnelle Aktualisierung
-const LIVE_COLS = ['ifAdminStatus', 'ifOperStatus', 'ifInOctets', 'ifOutOctets', 'ifInErrors', 'ifOutErrors'];
-const LIVE_COLS_V2 = ['ifHCInOctets', 'ifHCOutOctets'];
 
 const hexBuf = (h) => Buffer.from(typeof h === 'string' ? h : '', 'hex');
 const hexText = (h) => hexBuf(h).toString('utf8').replace(/\0+$/, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim();
@@ -49,6 +46,11 @@ function portList(hex) {
   return out;
 }
 const normMac = (m) => String(m || '').toLowerCase().replace(/-/g, ':');
+// Portname: HP 1810G meldet "Port: 1 Gigabit - Level" – daraus wird "1" (die App zeigt "Port 1")
+const portNameOf = (name) => {
+  const m = String(name || '').match(/^Port:?\s*(\d+)(\s|$)/i);
+  return m ? m[1] : name;
+};
 
 module.exports = function setupNetwork(ctx) {
   const { app, store, conns, agentRequest, broadcast, audit, auditReq, requireAdmin, wrap, httpError, log, agentLabel, versionAtLeast, tunnels, closeTunnel } = ctx;
@@ -69,12 +71,28 @@ module.exports = function setupNetwork(ctx) {
     return a;
   }
 
+  // Alle SNMP-Anfragen an dasselbe Gerät laufen nacheinander: einfache Switches werden bei parallelen
+  // Anfragen drastisch langsamer (HP 1810G: drei gleichzeitig 940 ms statt je 100 ms).
   async function snmp(d, ops, timeout = 30000, write = false) {
     const a = probeOf(d);
     if (!d.snmp) throw httpError(400, 'SNMP ist für dieses Gerät nicht eingerichtet');
     if (write && !d.snmp.writeCommunity) throw httpError(400, 'Für Änderungen fehlt die Schreib-Community (Einstellungen des Geräts)');
     const cfg = { host: d.host, port: d.snmp.port || 161, version: d.snmp.version, community: write ? d.snmp.writeCommunity : d.snmp.community };
-    return agentRequest(a.id, 'net.snmp', { snmp: cfg, ops }, timeout);
+    const rt = rtOf(d.id);
+    // Der Agent nimmt höchstens 60 Schritte je Anfrage – größere Abfragen (viele Ports) aufteilen
+    const run = async () => {
+      const results = [];
+      for (let i = 0; i < ops.length; i += 50) {
+        const part = ops.slice(i, i + 50);
+        const r = await agentRequest(a.id, 'net.snmp', { snmp: cfg, ops: part }, timeout);
+        results.push(...r.results);
+        if (r.results.length < part.length) break; // Gerät antwortet nicht mehr – Rest sparen
+      }
+      return { results };
+    };
+    const p = (rt.snmpChain || Promise.resolve()).then(run, run);
+    rt.snmpChain = p.catch(() => {});
+    return p;
   }
 
   // OPNsense-API: merkt sich beim ersten Kontakt den Fingerabdruck des (meist selbst signierten) Zertifikats
@@ -206,26 +224,24 @@ module.exports = function setupNetwork(ctx) {
     return { reachable: true, ok: true, info, alerts };
   }
 
+  // Regelmäßige Prüfung: Systemwerte und Port-Zustände gezielt per GET (zwei kleine Anfragen)
   async function checkSnmp(d) {
-    const r = await snmp(d, [
-      { op: 'get', oids: [OID.sysDescr, OID.sysUpTime, OID.sysName, OID.sysLocation] },
-      { op: 'walk', oid: OID.ifType, max: 1000 },
-      { op: 'walk', oid: OID.ifOperStatus, max: 1000 },
-    ], 30000);
+    let types;
+    try { types = await ifTable(d); } catch (e) { return { reachable: false, error: e.message }; }
+    const phys = [...types].filter(([, t]) => PHYS_TYPES.has(t)).map(([idx]) => idx).sort(byNum);
+    const r = await snmp(d, [{ op: 'get', oids: [OID.sysDescr, OID.sysUpTime, OID.sysName, OID.sysLocation] }, ...rowGets(['ifOperStatus'], phys)], 30000);
     const sys = r.results[0];
     if (!sys?.ok) return { reachable: false, error: sys?.error || 'Keine Antwort per SNMP' };
     const v = Object.fromEntries(sys.data.map(([oid, t, val]) => [oid, val]));
-    const types = new Map((r.results[1]?.data || []).map(([idx, , val]) => [idx, val]));
-    const oper = r.results[2]?.data || [];
-    const phys = oper.filter(([idx]) => PHYS_TYPES.has(types.get(idx)));
+    const oper = readRows(r.results.slice(1), ['ifOperStatus'], phys).ifOperStatus;
     const descr = hexText(v[OID.sysDescr]);
     return {
       reachable: true, ok: true,
       info: {
         sysName: hexText(v[OID.sysName]), descr, model: descr.split(/,|\s+revision\s+/i)[0].slice(0, 80),
         location: hexText(v[OID.sysLocation]), uptime: v[OID.sysUpTime] != null ? Math.floor(v[OID.sysUpTime] / 100) : null,
-        ports: { up: phys.filter(([, , s]) => s === 1).length, total: phys.length },
-        strip: phys.slice(0, 64).map(([, , s]) => (s === 1 ? 1 : 0)), // für die Port-Leiste auf der Kachel
+        ports: { up: phys.filter((idx) => oper.get(idx) === 1).length, total: phys.length },
+        strip: phys.slice(0, 64).map((idx) => (oper.get(idx) === 1 ? 1 : 0)), // für die Port-Leiste auf der Kachel
       },
       alerts: [],
     };
@@ -493,20 +509,56 @@ module.exports = function setupNetwork(ctx) {
   // Ports mit vielen Adressen oder LLDP-Nachbar führen zu weiteren Switches/Routern
   const UPLINK_MACS = 6;
 
-  // Nur die MAC-Tabelle (schnell) – für die Spalte "Switch-Port" in der Geräteliste der OPNsense
+  // ---- Schnelle Abfragen auch für langsame Switches ----
+  // Einfache Switches (z.B. HP 1810G) gehen Tabellen nur sehr langsam durch (10 Spalten: 12 s),
+  // gezielte GETs sind dagegen schnell. Deshalb: Interface-Liste einmal ermitteln und merken,
+  // danach je Interface EINE Anfrage mit allen Spalten (25 Ports x 10 Werte: 1,4 s). Nicht eine
+  // Spalte für viele Interfaces: der 1810G (Firmware P.1.17) liefert dann für alle den Wert des
+  // letzten. Nur Tabellen mit unbekannten Indizes (MAC-Tabelle, VLANs ...) werden durchgegangen.
+  const byNum = (a, b) => Number(a) - Number(b);
+  const walk = (k, max = 3000, reps = 10) => ({ op: 'walk', oid: OID[k], max, reps });
+
+  async function ifTable(d, maxAge = 15 * 60e3) {
+    const rt = rtOf(d.id);
+    if (rt.ifs && Date.now() - rt.ifs.at < maxAge) return rt.ifs.types;
+    const r = await snmp(d, [walk('ifType')], 60000);
+    const x = r.results[0];
+    if (!x?.ok) throw httpError(502, x?.error || 'Keine Antwort per SNMP');
+    rt.ifs = { at: Date.now(), types: new Map(x.data.map(([idx, , v]) => [idx, Number(v)])) };
+    return rt.ifs.types;
+  }
+  // Je Interface eine GET-Anfrage mit allen gewünschten Spalten
+  const rowGets = (cols, idxs) => idxs.map((idx) => ({ op: 'get', oids: cols.map((k) => `${OID[k]}.${idx}`) }));
+  // Antworten -> { Spalte: Map(Index -> Wert) }; fehlende Werte (Spalte gibt es nicht) bleiben leer.
+  // Die Antwort enthält die Werte in derselben Reihenfolge wie die Anfrage.
+  function readRows(results, cols, idxs) {
+    const out = Object.fromEntries(cols.map((k) => [k, new Map()]));
+    idxs.forEach((idx, i) => {
+      const x = results[i];
+      if (!x?.ok) return;
+      x.data.forEach(([, type, value], j) => { if (cols[j] && type !== 'none' && type !== 'end') out[cols[j]].set(idx, value); });
+    });
+    return out;
+  }
+
+  // Nur die MAC-Tabelle – für die Spalte "Switch-Port" in der Geräteliste der OPNsense
   async function refreshFdb(sw) {
-    const r = await snmp(sw, [
-      { op: 'walk', oid: OID.ifName, max: 3000 },
-      { op: 'walk', oid: OID.basePortIfIndex, max: 3000 },
-      { op: 'walk', oid: OID.dot1qTpFdbPort, max: 16000 },
-    ], 60000);
+    const rt = rtOf(sw.id);
+    const types = await ifTable(sw);
+    const idxs = [...types.keys()].sort(byNum);
+    const nameCols = ['ifDescr', ...(sw.snmp.version !== '1' && rt.ifx !== false ? ['ifName'] : [])];
+    const fdbCol = rt.skip?.qbridge && Date.now() - rt.skip.qbridge < SKIP_FOR ? 'dot1dTpFdbPort' : 'dot1qTpFdbPort';
+    const r = await snmp(sw, [...rowGets(nameCols, idxs), walk('basePortIfIndex'), walk(fdbCol, 16000)], 60000);
     if (!r.results[0]?.ok) return;
-    const names = colMap(r.results[0].data);
-    const bpIf = colMap(r.results[1]?.ok ? r.results[1].data : []);
-    const q = r.results[2]?.ok ? r.results[2].data : [];
+    const n = idxs.length;
+    const cols = readRows(r.results, nameCols, idxs);
+    const names = new Map([...cols.ifDescr].map(([idx, v]) => [idx, portNameOf(hexText(cols.ifName?.get(idx)) || hexText(v))]));
+    const bpIf = colMap(r.results[n]?.ok ? r.results[n].data : []);
+    let q = r.results[n + 1]?.ok ? r.results[n + 1].data : [];
     let b = [];
-    if (!q.length) {
-      const r2 = await snmp(sw, [{ op: 'walk', oid: OID.dot1dTpFdbPort, max: 16000 }], 60000);
+    if (fdbCol === 'dot1dTpFdbPort') [q, b] = [[], q];
+    else if (!q.length) {
+      const r2 = await snmp(sw, [walk('dot1dTpFdbPort', 16000)], 60000);
       b = r2.results[0]?.ok ? r2.results[0].data : [];
     }
     const entries = parseFdb(colMap(q), colMap(b));
@@ -519,31 +571,74 @@ module.exports = function setupNetwork(ctx) {
     const map = new Map();
     for (const [idx, macs] of perPort) {
       if (macs.length >= UPLINK_MACS) continue;
-      const name = hexText(names.get(String(idx))) || String(idx);
+      const name = names.get(String(idx)) || String(idx);
       for (const mac of macs) map.set(mac, name);
     }
-    rtOf(sw.id).fdb = { at: Date.now(), map };
+    rt.fdb = { at: Date.now(), map };
   }
 
+  // Tabellen, die per Walk kommen müssen; Gruppen, die ein Gerät nicht kennt, werden 30 min übersprungen
+  const WALK_GROUPS = {
+    qbridge: [['dot1qPvid'], ['dot1qVlanStaticName'], ['dot1qVlanStaticEgressPorts'], ['dot1qVlanStaticUntaggedPorts'], ['dot1qTpFdbPort', 16000]],
+    poe: [['pethPsePortAdminEnable', 3000, 5], ['pethPsePortDetectionStatus', 3000, 5], ['pethMainPsePower', 50, 5], ['pethMainPseOperStatus', 50, 5], ['pethMainPseConsumptionPower', 50, 5]],
+    lldp: [['lldpRemSysName', 500, 5]], // die übrigen LLDP-Spalten nur, wenn es Nachbarn gibt
+  };
+  const LLDP_MORE = [['lldpRemPortId', 500, 5], ['lldpRemPortDesc', 500, 5], ['lldpRemChassisId', 500, 5]];
+  const SKIP_FOR = 30 * 60e3;
+
   async function switchPorts(d, { live = false } = {}) {
-    const v2 = d.snmp.version !== '1';
-    const cols = live
-      ? [...LIVE_COLS, ...(v2 ? LIVE_COLS_V2 : [])]
-      : ['ifDescr', 'ifType', 'ifSpeed', 'ifPhysAddress', 'ifLastChange', ...LIVE_COLS, 'ifName', 'ifAlias', 'ifHighSpeed', ...(v2 ? LIVE_COLS_V2 : []),
-        'basePortIfIndex', 'dot1qPvid', 'dot1qVlanStaticName', 'dot1qVlanStaticEgressPorts', 'dot1qVlanStaticUntaggedPorts', 'dot1qTpFdbPort',
-        'pethPsePortAdminEnable', 'pethPsePortDetectionStatus', 'pethMainPsePower', 'pethMainPseOperStatus', 'pethMainPseConsumptionPower',
-        'lldpRemSysName', 'lldpRemPortId', 'lldpRemPortDesc', 'lldpRemChassisId'];
-    const ops = [{ op: 'get', oids: [OID.sysUpTime] }, ...cols.map((k) => ({ op: 'walk', oid: OID[k], max: k === 'dot1qTpFdbPort' ? 16000 : 3000 }))];
-    let r = await snmp(d, ops, 120000);
-    if (!r.results[0]?.ok) throw httpError(502, r.results[0]?.error || 'Keine Antwort per SNMP');
-    const c = {};
-    cols.forEach((k, i) => { c[k] = colMap(r.results[i + 1]?.ok ? r.results[i + 1].data : []); });
-    // Ältere Switches ohne Q-BRIDGE: MAC-Tabelle aus der einfachen Bridge-MIB
-    if (!live && !c.dot1qTpFdbPort.size) {
-      r = await snmp(d, [{ op: 'walk', oid: OID.dot1dTpFdbPort, max: 16000 }], 60000);
-      c.dot1dTpFdbPort = colMap(r.results[0]?.ok ? r.results[0].data : []);
-    }
     const rt = rtOf(d.id);
+    const v2 = d.snmp.version !== '1';
+    const types = await ifTable(d, live ? 15 * 60e3 : 5 * 60e3);
+    const allIdx = [...types.keys()].sort(byNum);
+    // Live nur, was die Seite zeigt (beim Switch die physischen Ports)
+    const idxs = live && d.kind === 'switch' ? allIdx.filter((idx) => PHYS_TYPES.has(types.get(idx))) : allIdx;
+    const hc = v2 && rt.hc !== false; // 64-Bit-Zähler (ifXTable) – erkannt beim ersten vollen Laden
+    const ifx = v2 && rt.ifx !== false;
+    const counterCols = hc && rt.hc ? ['ifHCInOctets', 'ifHCOutOctets'] : [...(hc ? ['ifHCInOctets', 'ifHCOutOctets'] : []), 'ifInOctets', 'ifOutOctets'];
+    const cols = live
+      ? ['ifAdminStatus', 'ifOperStatus', ...counterCols]
+      : ['ifDescr', 'ifSpeed', 'ifPhysAddress', 'ifLastChange', 'ifAdminStatus', 'ifOperStatus', ...counterCols, 'ifInErrors', 'ifOutErrors', ...(ifx ? ['ifName', 'ifAlias', 'ifHighSpeed'] : [])];
+    const skip = (grp) => rt.skip?.[grp] && Date.now() - rt.skip[grp] < SKIP_FOR;
+    // Bridge-Port -> ifIndex ändert sich praktisch nie: wie die Interface-Liste 15 min merken
+    const bpFresh = rt.bp && Date.now() - rt.bp.at < 15 * 60e3;
+    const walks = live ? [] : [
+      ...(bpFresh ? [] : [['basePortIfIndex']]),
+      ...Object.entries(WALK_GROUPS).filter(([grp]) => !skip(grp)).flatMap(([, list]) => list),
+      ...(skip('qbridge') ? [['dot1dTpFdbPort', 16000]] : []),
+    ];
+    const ops = [{ op: 'get', oids: [OID.sysUpTime] }, ...rowGets(cols, idxs), ...walks.map(([k, max, reps]) => walk(k, max, reps))];
+    const r = await snmp(d, ops, 120000);
+    if (!r.results[0]?.ok) throw httpError(502, r.results[0]?.error || 'Keine Antwort per SNMP');
+    const ticks = r.results[0].data[0]?.[2];
+    const uptime = ticks != null ? Math.floor(ticks / 100) : null;
+    const c = readRows(r.results.slice(1), cols, idxs);
+    const w0 = 1 + idxs.length;
+    walks.forEach(([k], i) => { c[k] = colMap(r.results[w0 + i]?.ok ? r.results[w0 + i].data : []); });
+    for (const k of Object.keys(OID)) c[k] ??= new Map();
+    if (!live) {
+      // Nur aus vollständigen Antworten schließen, welche Tabellen das Gerät kennt
+      if (v2 && r.results.slice(1, w0).length === idxs.length && r.results.slice(1, w0).every((x) => x?.ok)) {
+        if (rt.hc !== false) rt.hc = c.ifHCInOctets.size > 0;
+        if (rt.ifx !== false) rt.ifx = c.ifName.size > 0 || c.ifAlias.size > 0;
+      }
+      rt.skip ??= {};
+      const empty = (grp) => !skip(grp) && WALK_GROUPS[grp].every(([k]) => !c[k].size);
+      if (empty('qbridge')) rt.skip.qbridge = Date.now();
+      if (empty('poe')) rt.skip.poe = Date.now();
+      if (bpFresh) c.basePortIfIndex = rt.bp.map;
+      else rt.bp = { at: Date.now(), map: c.basePortIfIndex };
+      // Nachrufen, was nur manchmal gebraucht wird: MAC-Tabelle aus der einfachen Bridge-MIB (ältere
+      // Switches ohne Q-BRIDGE) und die übrigen LLDP-Spalten, falls es Nachbarn gibt
+      const more = [
+        ...(!c.dot1qTpFdbPort.size && !c.dot1dTpFdbPort.size ? [['dot1dTpFdbPort', 16000]] : []),
+        ...(c.lldpRemSysName.size ? LLDP_MORE : []),
+      ];
+      if (more.length) {
+        const r2 = await snmp(d, more.map(([k, max, reps]) => walk(k, max, reps)), 60000);
+        more.forEach(([k], i) => { c[k] = colMap(r2.results[i]?.ok ? r2.results[i].data : []); });
+      }
+    }
     const now = Date.now();
 
     // Raten aus der Differenz zur letzten Abfrage (32-Bit-Zähler laufen über)
@@ -552,25 +647,24 @@ module.exports = function setupNetwork(ctx) {
     const rateOf = (idx, key, cur, hc) => {
       const p = prev?.map.get(idx);
       if (!p || cur == null || p[key] == null) return null;
-      const dt = (now - prev.ts) / 1000;
+      const dt = (now - p.ts) / 1000;
       if (dt < 1) return null;
       let diff = cur - p[key];
       if (diff < 0 && !hc) diff += 2 ** 32;
       return diff >= 0 ? diff / dt : null;
     };
-    const ifIdx = [...new Set([...(c.ifType || c.ifOperStatus).keys()])].sort((a, b) => Number(a) - Number(b));
-    const live1 = ifIdx.map((idx) => {
-      const hc = c.ifHCInOctets?.has(idx);
-      const rx = hc ? c.ifHCInOctets.get(idx) : c.ifInOctets.get(idx);
-      const tx = hc ? c.ifHCOutOctets.get(idx) : c.ifOutOctets.get(idx);
-      counters.set(idx, { rx, tx });
+    const live1 = idxs.map((idx) => {
+      const big = c.ifHCInOctets.has(idx);
+      const rx = big ? c.ifHCInOctets.get(idx) : c.ifInOctets.get(idx);
+      const tx = big ? c.ifHCOutOctets.get(idx) : c.ifOutOctets.get(idx);
+      counters.set(idx, { rx, tx, ts: now });
       return {
         ifIndex: Number(idx), admin: IF_STATUS[c.ifAdminStatus.get(idx)] || 'unknown', oper: IF_STATUS[c.ifOperStatus.get(idx)] || 'unknown',
-        rx: rateOf(idx, 'rx', rx, hc), tx: rateOf(idx, 'tx', tx, hc), rxTotal: rx ?? null, txTotal: tx ?? null,
-        inErr: c.ifInErrors.get(idx) ?? null, outErr: c.ifOutErrors.get(idx) ?? null,
+        rx: rateOf(idx, 'rx', rx, big), tx: rateOf(idx, 'tx', tx, big), rxTotal: rx ?? null, txTotal: tx ?? null,
+        ...(live ? {} : { inErr: c.ifInErrors.get(idx) ?? null, outErr: c.ifOutErrors.get(idx) ?? null }),
       };
     });
-    rt.counters = { ts: now, map: counters };
+    rt.counters = { map: new Map([...(prev?.map || []), ...counters]) };
     if (live) return { ts: now, live: true, ports: live1 };
 
     // Bridge-Port -> ifIndex (meist identisch)
@@ -617,8 +711,8 @@ module.exports = function setupNetwork(ctx) {
 
     const ports = live1.map((p) => {
       const idx = String(p.ifIndex);
-      const type = Number(c.ifType.get(idx));
-      const name = hexText(c.ifName.get(idx)) || hexText(c.ifDescr.get(idx)) || `Port ${idx}`;
+      const type = types.get(idx);
+      const name = portNameOf(hexText(c.ifName.get(idx)) || hexText(c.ifDescr.get(idx))) || `Port ${idx}`;
       const macs = (fdb.get(p.ifIndex) || []).map((m) => ({ ...m, ...(known.get(m.mac) || {}), probe: probeMacs.has(m.mac) }));
       const uplink = (lldp.get(p.ifIndex) || []).length > 0 || macs.length >= UPLINK_MACS;
       if (!uplink) for (const m of macs) fdbMap.set(m.mac, name);
@@ -636,7 +730,7 @@ module.exports = function setupNetwork(ctx) {
     });
     rt.fdb = { at: now, map: fdbMap };
     return {
-      ts: now, uptime: r.results[0].data[0]?.[2] != null ? Math.floor(r.results[0].data[0][2] / 100) : null,
+      ts: now, uptime,
       ports, vlans: vlans.map((v) => ({ vid: v.vid, name: v.name, ports: v.egress.length })), poe: poeMain, write: !!d.snmp.writeCommunity,
     };
   }
@@ -644,10 +738,10 @@ module.exports = function setupNetwork(ctx) {
   async function switchInfo(d) {
     const r = await snmp(d, [
       { op: 'get', oids: [OID.sysDescr, OID.sysObjectID, OID.sysUpTime, OID.sysContact, OID.sysName, OID.sysLocation] },
-      { op: 'walk', oid: OID.entPhysicalClass, max: 200 },
-      { op: 'walk', oid: OID.entPhysicalModelName, max: 200 },
-      { op: 'walk', oid: OID.entPhysicalSerialNum, max: 200 },
-      { op: 'walk', oid: OID.entPhysicalSoftwareRev, max: 200 },
+      walk('entPhysicalClass', 200, 5),
+      walk('entPhysicalModelName', 200, 5),
+      walk('entPhysicalSerialNum', 200, 5),
+      walk('entPhysicalSoftwareRev', 200, 5),
     ], 40000);
     const x = r.results[0];
     if (!x?.ok) throw httpError(502, x?.error || 'Keine Antwort per SNMP');
@@ -784,10 +878,17 @@ module.exports = function setupNetwork(ctx) {
   const CALLS = {
     // ---- Switch / SNMP ----
     'snmp.info': { kinds: ['switch', 'device'], run: (d) => switchInfo(d) },
+    // maxAge: letzter vollständiger Stand darf so alt sein (die Seite zeigt ihn sofort und lädt dann nach).
+    // Läuft schon eine volle Abfrage, warten alle Aufrufer auf dieselbe.
     'snmp.ports': { kinds: ['switch', 'device'], run: async (d, p) => {
-      const r = await switchPorts(d, { live: !!p.live });
-      if (!r.live) rtOf(d.id).lastPorts = r.ports;
-      return r;
+      if (p.live) return switchPorts(d, { live: true });
+      const rt = rtOf(d.id);
+      const maxAge = Math.min(Math.max(Number(p.maxAge) || 0, 0), 10 * 60e3);
+      if (maxAge && rt.portsFull && Date.now() - rt.portsFull.ts <= maxAge) return { ...rt.portsFull, cached: true };
+      rt.portsPending ??= switchPorts(d)
+        .then((r) => { rt.portsFull = r; rt.lastPorts = r.ports; return r; })
+        .finally(() => { rt.portsPending = null; });
+      return rt.portsPending;
     } },
     'snmp.port': {
       kinds: ['switch', 'device'], cat: 'network',
@@ -964,6 +1065,7 @@ module.exports = function setupNetwork(ctx) {
     const entry = () => ({ agentId: d.id, target: d.name, detail: def.detail?.(params, d) });
     try {
       const r = await def.run(d, params);
+      if (label && action.startsWith('snmp.')) rt.portsFull = null; // geschaltet: gespeicherten Stand verwerfen
       if (label) auditReq(req, def.cat || 'network', label, entry());
       res.json(r ?? { ok: true });
     } catch (e) {
