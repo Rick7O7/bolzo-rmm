@@ -6,7 +6,7 @@ import { addClientDialog } from './settings.js';
 import { AUDIT_CATS } from './history.js';
 import { fetchGuests, poll } from '../proxmox.js';
 
-const EV_ICON = { auth: 'key', client: 'monitor', power: 'power', action: 'refresh', script: 'code', shell: 'terminal', settings: 'sliders', system: 'server', connection: 'network' };
+const EV_ICON = { auth: 'key', client: 'monitor', power: 'power', action: 'refresh', script: 'code', shell: 'terminal', settings: 'sliders', system: 'server', connection: 'network', network: 'ethernet' };
 
 function miniLine(points, key, color) {
   if (!points || points.length < 2) return '<div class="w-mini"></div>';
@@ -102,11 +102,21 @@ export function renderDashboard(root, { go }) {
   function attention() {
     const items = [];
     for (const a of api.agents.values()) for (const al of a.alerts || []) items.push({ a, al });
+    // Netzwerkgeräte: nicht erreichbar oder z.B. Gateway gestört
+    for (const d of api.net.values()) {
+      const a = { id: d.id, name: d.name, lastSeen: d.lastSeen, href: `#/netdev/${d.id}` };
+      if (d.state === 'offline') items.push({ a, al: { kind: 'offline', level: 'critical' } });
+      else if (d.state === 'warning') {
+        const list = (d.alerts || []).filter((x) => x.level === 'warning' || x.level === 'critical');
+        if (list.length) for (const al of list) items.push({ a, al });
+        else items.push({ a, al: { kind: 'net', level: 'warning', label: d.error || 'Warnung' } });
+      }
+    }
     items.sort((x, y) => (x.al.level === 'critical' ? 0 : 1) - (y.al.level === 'critical' ? 0 : 1) || x.a.name.localeCompare(y.a.name));
     $('[data-attn-count]', root).textContent = items.length || '';
     $('[data-attn]', root).innerHTML = items.length
-      ? items.slice(0, 8).map(({ a, al }) => `<div class="ev click" data-id="${a.id}"><span class="ev-ic ${al.level === 'critical' ? 'crit' : 'warn'}">${icon(al.kind === 'offline' ? 'power' : 'alert', 'sm')}</span>
-          <div class="ev-tx"><div><b>${esc(a.name)}</b></div><div class="muted">${al.kind === 'offline' ? `Offline seit ${fmtAgo(a.lastSeen).replace(/^vor /, '')}` : esc(al.label)}</div></div>
+      ? items.slice(0, 8).map(({ a, al }) => `<div class="ev click" ${a.href ? `data-href="${esc(a.href)}"` : `data-id="${a.id}"`}><span class="ev-ic ${al.level === 'critical' ? 'crit' : 'warn'}">${icon(al.kind === 'offline' ? 'power' : al.kind === 'gateway' ? 'globe' : 'alert', 'sm')}</span>
+          <div class="ev-tx"><div><b>${esc(a.name)}</b></div><div class="muted">${al.kind === 'offline' ? `${a.href ? 'Nicht erreichbar' : 'Offline'}${a.lastSeen ? ` seit ${fmtAgo(a.lastSeen).replace(/^vor /, '')}` : ''}` : esc(al.label)}</div></div>
           <span class="badge ${al.level === 'critical' ? 'critical' : 'warning'}">${al.level === 'critical' ? 'Kritisch' : 'Warnung'}</span></div>`).join('')
         + (items.length > 8 ? `<div class="muted" style="font-size:12px;padding-top:6px">+ ${items.length - 8} weitere</div>` : '')
       : `<div class="ok-line">${icon('check', 'sm')}Alles in Ordnung</div>`;
@@ -144,14 +154,18 @@ export function renderDashboard(root, { go }) {
 
   const redraw = throttle(() => { tiles(); rows(); attention(); }, 1000);
   $('.dash-main', root).addEventListener('click', (e) => {
+    if (e.target.closest('a')) return;
+    const link = e.target.closest('[data-href]');
+    if (link) return go(link.dataset.href);
     const row = e.target.closest('[data-id]');
-    if (row && !e.target.closest('a')) go(`#/client/${row.dataset.id}`);
+    if (row) go(`#/client/${row.dataset.id}`);
   });
   redraw();
   loadHist();
   loadPve();
   const offAgents = api.on('agents', redraw);
+  const offNet = api.on('net', redraw);
   const stop1 = poll(loadHist, 30000);
   const stop2 = poll(loadPve, 60000);
-  return () => { offAgents(); offAudit(); stop1(); stop2(); chart.destroy?.(); };
+  return () => { offAgents(); offNet(); offAudit(); stop1(); stop2(); chart.destroy?.(); };
 }

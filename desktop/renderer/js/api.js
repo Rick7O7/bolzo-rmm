@@ -17,6 +17,7 @@ class Api extends EventTarget {
     this.agents = new Map();
     this.settings = { thresholds: { cpu: 90, mem: 90, disk: 90 } };
     this.folders = []; // Ordnerstruktur für Clients
+    this.net = new Map(); // Netzwerkgeräte (OPNsense, Switches ...)
     this.connected = false;
     this.ws = null;
     this._retry = null;
@@ -78,6 +79,7 @@ class Api extends EventTarget {
     LS.del('token');
     this.disconnect();
     this.agents.clear();
+    this.net.clear();
     this.emit('logout');
   }
 
@@ -152,8 +154,21 @@ class Api extends EventTarget {
         for (const a of msg.agents) this.agents.set(a.id, a);
         this.settings = msg.settings;
         this.folders = msg.folders || [];
+        this.net.clear();
+        for (const d of msg.net || []) this.net.set(d.id, d);
         this.emit('agents');
         this.emit('folders');
+        this.emit('net');
+        break;
+      case 'net': {
+        const prev = this.net.get(msg.device.id);
+        this.net.set(msg.device.id, msg.device);
+        this.emit('net', { device: msg.device, prev });
+        break;
+      }
+      case 'net.removed':
+        this.net.delete(msg.id);
+        this.emit('net');
         break;
       case 'agent': {
         const prev = this.agents.get(msg.agent.id);
@@ -198,6 +213,7 @@ class Api extends EventTarget {
 
   // ---------- Komfortfunktionen ----------
   action(id, action, params) { return this.post(`/api/agents/${id}/action`, { action, params }); }
+  netCall(id, action, params) { return this.post(`/api/net/${id}/call`, { action, params }); }
 }
 
 export const api = new Api();

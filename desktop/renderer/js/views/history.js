@@ -20,6 +20,7 @@ export const AUDIT_CATS = {
   shell: { label: 'Terminal', color: '#22a03a' },
   settings: { label: 'Einstellungen', color: '#d55181' },
   system: { label: 'System', color: '#8a8f98' },
+  network: { label: 'Netzwerk', color: '#2bb5a8' },
   connection: { label: 'Verbindung', color: '#5c7290' },
 };
 // Standardansicht ohne Online/Offline-Meldungen, die sonst alles überfluten

@@ -71,6 +71,7 @@ class Store {
     data.sessions ??= {};
     data.apiTokens ??= []; // eingeschränkte Zugänge, z.B. für die Telefon-Sprachsteuerung
     data.folders ??= []; // Ordnerstruktur für Clients: { id, name, parentId }
+    data.netDevices ??= []; // OPNsense, Switches und andere Netzwerkgeräte (siehe network.js)
     data.history ??= [];
     data.jobs ??= []; // vorbereitete Aufgaben: fester Befehl auf festen Rechnern (auch per Telefon)
     data.settings ??= {};

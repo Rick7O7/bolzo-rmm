@@ -9,6 +9,8 @@ import { renderHistory } from './views/history.js';
 import { renderSettings } from './views/settings.js';
 import { renderPve } from './views/pve.js';
 import { renderGuest } from './views/guest.js';
+import { renderNetwork, netProblems, KIND } from './views/network.js';
+import { renderNetDevice } from './views/netdev.js';
 import { updates, initUpdates } from './updates.js';
 
 const app = $('#app');
@@ -16,13 +18,14 @@ const NAV = [
   { href: '#/dashboard', label: 'Dashboard', icon: 'grid' },
   { href: '#/clients', label: 'Clients', icon: 'monitor' },
   { href: '#/proxmox', label: 'Proxmox', icon: 'server' },
+  { href: '#/network', label: 'Netzwerk', icon: 'network' },
   { href: '#/scripts', label: 'Skripte', icon: 'code' },
   { href: '#/jobs', label: 'Jobs', icon: 'zap' },
   { href: '#/history', label: 'Verlauf', icon: 'clock' },
   { href: '#/settings', label: 'Einstellungen', icon: 'sliders', bottom: true }, // unten über der Verbindungsanzeige
 ];
 // Symbol-Leiste: nur Icons, Name als Tooltip; kleine Zähler für Probleme
-const navItem = (n) => `<a class="nav-item" href="${n.href}" data-tip="${n.label}">${icon(n.icon)}${n.href === '#/clients' ? '<span class="nav-count" data-problems hidden></span>' : ''}</a>`;
+const navItem = (n) => `<a class="nav-item" href="${n.href}" data-tip="${n.label}">${icon(n.icon)}${n.href === '#/clients' ? '<span class="nav-count" data-problems hidden></span>' : n.href === '#/network' ? '<span class="nav-count" data-netproblems hidden></span>' : ''}</a>`;
 const ROUTES = {
   dashboard: renderDashboard,
   clients: renderClients,
@@ -32,6 +35,8 @@ const ROUTES = {
   history: renderHistory,
   proxmox: renderPve,
   guest: renderGuest,
+  network: renderNetwork,
+  netdev: renderNetDevice,
   settings: renderSettings,
 };
 
@@ -87,7 +92,7 @@ function showShell() {
           <div class="crumbs"><span class="root">BOLZO RMM</span><span class="sep">/</span><span data-crumb></span></div>
           <span class="grow"></span>
           <div class="gsearch">
-            ${icon('search', 'sm')}<input data-gsearch placeholder="Clients, IPs, Tags suchen" spellcheck="false"><kbd>Strg K</kbd>
+            ${icon('search', 'sm')}<input data-gsearch placeholder="Clients, Geräte, IPs, Tags suchen" spellcheck="false"><kbd>Strg K</kbd>
             <div class="gsearch-results" data-gresults hidden></div>
           </div>
           <span class="conn-pill" data-conn title="${esc(api.server.replace(/^https?:\/\//, ''))}"><span class="dot" data-conndot></span><span data-connlabel>Verbinde ...</span></span>
@@ -107,15 +112,19 @@ function initSearch() {
   const draw = () => {
     const q = input.value.trim().toLowerCase();
     if (!q) { box.hidden = true; return; }
-    hits = [...api.agents.values()].filter((a) => [a.name, a.hostname, primaryIp(a), a.os, a.publicIp, a.pve?.hostName, isPveHost(a) ? 'proxmox' : '', ...(a.tags || [])]
-      .join(' ').toLowerCase().includes(q)).sort((a, b) => b.online - a.online || a.name.localeCompare(b.name)).slice(0, 8);
+    const clients = [...api.agents.values()].filter((a) => [a.name, a.hostname, primaryIp(a), a.os, a.publicIp, a.pve?.hostName, isPveHost(a) ? 'proxmox' : '', ...(a.tags || [])]
+      .join(' ').toLowerCase().includes(q)).sort((a, b) => b.online - a.online || a.name.localeCompare(b.name))
+      .map((a) => ({ id: a.id, href: `#/client/${a.id}`, name: a.name, sub: primaryIp(a), dot: a.online ? 'online' : 'offline' }));
+    const devices = [...api.net.values()].filter((d) => [d.name, d.host, KIND[d.kind]?.long, d.kind === 'opnsense' ? 'firewall' : ''].join(' ').toLowerCase().includes(q))
+      .map((d) => ({ id: d.id, href: `#/netdev/${d.id}`, name: d.name, sub: `${KIND[d.kind]?.label || ''} · ${d.host}`, dot: d.state === 'online' ? 'online' : d.state === 'warning' ? 'alert' : 'offline' }));
+    hits = [...clients, ...devices].slice(0, 8);
     sel = Math.min(sel, Math.max(0, hits.length - 1));
     box.hidden = false;
-    box.innerHTML = hits.length ? hits.map((a, i) => `<div class="gs-item ${i === sel ? 'on' : ''}" data-id="${a.id}">
-        <span class="dot ${a.online ? 'online' : 'offline'}"></span><span class="n">${esc(a.name)}</span><span class="s">${esc(primaryIp(a))}</span></div>`).join('')
+    box.innerHTML = hits.length ? hits.map((h, i) => `<div class="gs-item ${i === sel ? 'on' : ''}" data-i="${i}">
+        <span class="dot ${h.dot}"></span><span class="n">${esc(h.name)}</span><span class="s">${esc(h.sub)}</span></div>`).join('')
       : '<div class="gs-empty">Keine Treffer</div>';
   };
-  const open = (a) => { if (!a) return; input.value = ''; box.hidden = true; input.blur(); go(`#/client/${a.id}`); };
+  const open = (h) => { if (!h) return; input.value = ''; box.hidden = true; input.blur(); go(h.href); };
   input.addEventListener('input', () => { sel = 0; draw(); });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown') { sel = Math.min(sel + 1, hits.length - 1); draw(); e.preventDefault(); }
@@ -126,8 +135,8 @@ function initSearch() {
   input.addEventListener('blur', () => setTimeout(() => (box.hidden = true), 150));
   input.addEventListener('focus', draw);
   box.addEventListener('mousedown', (e) => {
-    const it = e.target.closest('[data-id]');
-    if (it) open(api.agents.get(it.dataset.id));
+    const it = e.target.closest('[data-i]');
+    if (it) open(hits[Number(it.dataset.i)]);
   });
 }
 document.addEventListener('keydown', (e) => {
@@ -156,6 +165,17 @@ function updateBadge() {
   b.closest('.nav-item').dataset.tip = `Clients · ${all.filter((a) => a.online).length} von ${all.length} online`;
 }
 
+// Zähler an "Netzwerk": Geräte offline oder mit Warnung (z.B. Gateway gestört)
+function updateNetBadge() {
+  const b = $('[data-netproblems]');
+  if (!b) return;
+  const n = netProblems().length;
+  b.hidden = !n;
+  b.textContent = n;
+  const all = [...api.net.values()];
+  b.closest('.nav-item').dataset.tip = all.length ? `Netzwerk · ${all.filter((d) => d.state === 'online' || d.state === 'warning').length} von ${all.length} erreichbar` : 'Netzwerk';
+}
+
 // Hinweis in der Leiste, sobald irgendein Update bereitsteht
 function updatePill() {
   const pill = $('[data-updpill]');
@@ -175,10 +195,13 @@ function route() {
   const view = ROUTES[name] || renderDashboard;
   $$('.nav-item').forEach((n) => {
     const target = n.getAttribute('href').slice(2);
-    n.classList.toggle('active', !n.hasAttribute('data-updpill') && (target === name || (name === 'client' && target === 'clients') || (name === 'guest' && target === 'proxmox')));
+    n.classList.toggle('active', !n.hasAttribute('data-updpill') && (target === name || (name === 'client' && target === 'clients') || (name === 'guest' && target === 'proxmox') || (name === 'netdev' && target === 'network')));
   });
   const crumb = $('[data-crumb]');
-  if (crumb) crumb.textContent = name === 'client' ? `Clients / ${api.agents.get(params[0])?.name || ''}` : name === 'guest' ? `Proxmox / ${api.agents.get(params[0])?.name || ''}` : (NAV.find((n) => n.href === `#/${name}`) || NAV[0]).label;
+  if (crumb) {
+    crumb.textContent = name === 'client' ? `Clients / ${api.agents.get(params[0])?.name || ''}` : name === 'guest' ? `Proxmox / ${api.agents.get(params[0])?.name || ''}`
+      : name === 'netdev' ? `Netzwerk / ${api.net.get(params[0])?.name || ''}` : (NAV.find((n) => n.href === `#/${name}`) || NAV[0]).label;
+  }
   cleanup?.();
   const page = $('#page');
   page.scrollTop = 0;
@@ -193,6 +216,19 @@ api.on('agent', ({ agent, prev }) => {
     new Notification(agent.online ? `${agent.name} ist wieder online` : `${agent.name} ist offline`, {
       body: agent.online ? 'Der Client hat sich wieder verbunden.' : 'Der Agent hat die Verbindung verloren.',
       silent: agent.online,
+    });
+  } catch {}
+});
+api.on('net', (e) => {
+  updateNetBadge();
+  const { device: d, prev } = e || {};
+  if (!d || !prev || !LS.get('notify', true)) return;
+  const up = (s) => s === 'online' || s === 'warning';
+  if (prev.state === 'unknown' || d.state === 'unknown' || up(prev.state) === up(d.state)) return;
+  try {
+    new Notification(up(d.state) ? `${d.name} ist wieder erreichbar` : `${d.name} ist nicht erreichbar`, {
+      body: up(d.state) ? `${KIND[d.kind]?.long || 'Gerät'} antwortet wieder.` : d.error || 'Das Gerät antwortet nicht mehr.',
+      silent: up(d.state),
     });
   } catch {}
 });
@@ -217,6 +253,7 @@ function start() {
 api.on('conn', updateConn);
 api.on('agents', () => {
   updateBadge();
+  updateNetBadge();
   // Erste Daten nach dem Verbinden: aktuelle Ansicht neu zeichnen
   if (waitingForFirstData) {
     waitingForFirstData = false;

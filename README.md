@@ -35,6 +35,8 @@ Ports geöffnet werden, und sie funktionieren auch hinter NAT.
 - **Warnschwellen** für CPU/RAM/Disk und **Windows-Benachrichtigungen**, wenn ein Client offline geht
 - **Install-Einzeiler** für neue Clients (Linux + Windows) direkt aus der App kopierbar
 - Agent **aktualisieren** oder **deinstallieren** per Klick
+- **Netzwerk:** OPNsense-Firewalls, Switches und andere Geräte (Drucker, Access Points ...) über einen
+  Abfrage-Client – siehe unten
 
 ## 1. Server installieren
 
@@ -153,6 +155,43 @@ Technisch: Der Host-Agent setzt per QEMU-Monitor ein Einmal-Passwort, das 60 s g
 den VNC-Socket der VM über einen eigenen WebSocket (`/ws/tunnel`) mit dem Server, der die Daten
 unverändert an die App reicht (`/ws/console`). Am Proxmox muss dafür nichts eingerichtet werden.
 
+## Netzwerk: OPNsense, Switches und andere Geräte
+
+Netzwerkgeräte bekommen keinen Agent. Stattdessen fragt sie ein **Abfrage-Client** ab: ein ganz
+normaler BOLZO-Client (Agent ab 1.7.0) im selben Netz, der für den Server pingt, SNMP spricht und die
+OPNsense-API aufruft. Am besten ein eigener kleiner Linux-Container (z.B. Debian-LXC, 512 MB RAM).
+
+1. Agent auf dem Container installieren wie bei jedem Client.
+2. App → **Netzwerk → Abfrage-Clients** (oder Client → ⋯ → „Als Abfrage-Client freigeben“).
+3. **Netzwerk → Gerät hinzufügen**, Art wählen, „Verbindung testen“, hinzufügen.
+
+Alle Geräte werden alle 30 Sekunden geprüft (Ping plus API bzw. SNMP). Ausfälle erscheinen im Dashboard,
+als Windows-Benachrichtigung und im Protokoll.
+
+- **OPNsense** (per API-Schlüssel – in der OPNsense unter System → Zugang → Benutzer → API-Schlüssel „+“;
+  der Benutzer braucht die passenden Rechte, am einfachsten Gruppe `admins`):
+  Übersicht (Version, CPU, RAM, Disk, Temperatur, Gateways, Schnittstellen mit Durchsatz),
+  **Geräte im Netz** (DHCP-Leases von ISC/Kea/Dnsmasq plus ARP, mit BOLZO-Client und Switch-Port),
+  **Dienste** starten/stoppen/neu starten, **Firewall** (Live-Log, Regeln ein-/ausschalten), **VPN**
+  (WireGuard, OpenVPN, IPsec), **Updates** prüfen und installieren, Neustart, Konfiguration sichern
+  (config.xml). Das meist selbst signierte Zertifikat wird beim ersten Kontakt gemerkt (wie bei SSH);
+  ändert es sich, geht nichts mehr raus, bis man es in „Bearbeiten“ neu vertraut. Wird der API-Schlüssel
+  abgelehnt, pausieren die Abfragen 10 Minuten, damit die OPNsense den Abfrage-Client nicht aussperrt.
+- **Switch** (SNMP v1/v2c): Frontansicht aller Ports (Geschwindigkeit, PoE, deaktiviert), Tabelle mit
+  VLANs, Durchsatz, Fehlern, LLDP-Nachbarn und den **angeschlossenen Geräten** aus der MAC-Tabelle –
+  mit Namen und IPs von BOLZO-Clients und der OPNsense. Mit Schreib-Community: Port aktivieren/
+  deaktivieren, PoE neu starten/aus/an, Port-Beschreibung ändern. Ohne SNMP nur Erreichbarkeit.
+  HP ProCurve hat SNMP ab Werk an (Community meist `public`, prüfen mit `show snmp-server`).
+- **Weitere Geräte:** Erreichbarkeit per Ping (gibt es auf dem Abfrage-Client kein `ping`, wird über
+  TCP 443/80/22 geprüft), optional SNMP.
+- **Weboberfläche:** „Direkt öffnen“ (im selben Netz oder per VPN) oder „Über den Abfrage-Client
+  öffnen“ – dann öffnet die Desktop-App einen lokalen Port auf `127.0.0.1` und tunnelt jede
+  Browser-Verbindung über Server und Abfrage-Client zum Gerät. Bei HTTPS warnt der Browser wegen der
+  Adresse 127.0.0.1 vor dem Zertifikat.
+
+API-Schlüssel und SNMP-Communities liegen nur auf dem Server (`db.json`, nur für den Dienstbenutzer lesbar) und
+gehen mit jeder einzelnen Anfrage an den Abfrage-Client; die App bekommt sie nie zurück.
+
 ## Sprachsteuerung per Telefon (optional)
 
 Eine ungenutzte Festnetznummer der FRITZ!Box anrufen, PIN eintippen und z.B. „Fahr SRV-MC herunter"
@@ -179,6 +218,12 @@ diktierte Befehle gibt es am Telefon nie.
 4. `/etc/bolzo-voice/voice.env` ausfüllen (FRITZ!Box-Zugang, `RMM_TOKEN`, eigener
    `ANTHROPIC_API_KEY` von console.anthropic.com, `PIN`), dann `systemctl restart bolzo-voice`.
    Logs: `journalctl -u bolzo-voice -f`.
+5. **Natürliche Stimme (empfohlen):** Ohne weitere Einstellung spricht die Offline-Stimme Piper, die
+   deutlich künstlich klingt. Dafür im [Azure-Portal](https://portal.azure.com) einen „Speech service“ mit
+   dem Tarif „Free F0“ anlegen (500.000 Zeichen im Monat kostenlos, das reicht locker). Unter „Schlüssel
+   und Endpunkt“ Schlüssel 1 und Region als `AZURE_SPEECH_KEY` und `AZURE_SPEECH_REGION` in `voice.env`
+   eintragen. Die Stimme wählt `AZURE_VOICE` (Standard `de-DE-ConradNeural`). Ist Azure nicht erreichbar,
+   spricht automatisch Piper.
 
 ## Sicherheit
 
@@ -211,11 +256,14 @@ diktierte Befehle gibt es am Telefon nie.
 - Windows-Terminal ist zeilenbasiert (kein ConPTY): interaktive Vollbildprogramme laufen dort nicht.
 - Netzwerkdurchsatz wird nur unter Linux erfasst.
 - Verlaufsdaten der Auslastung liegen im Speicher des Servers (letzte Stunde) und gehen bei einem Neustart verloren.
+- SNMPv3 wird (noch) nicht unterstützt, nur v1 und v2c.
+- Die OPNsense-Firewallregeln zeigt die API je nach Version nur für die neuen/automatisierten Regeln.
 
 ## Projektstruktur
 
 ```
 server/            Server (Express + ws), Datenhaltung in data/db.json
+  network.js       Netzwerkgeräte (OPNsense, Switches) über Abfrage-Clients
   agent/agent.js   Agent, wird von den Clients beim Installieren geladen
   templates/       Install-Skripte für Linux und Windows
   install-server.sh

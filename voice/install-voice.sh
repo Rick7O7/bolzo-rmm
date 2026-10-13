@@ -80,6 +80,18 @@ ALLOWED_CALLERS=
 WHISPER_MODEL=small
 EOF
 fi
+if ! grep -q '^AZURE_SPEECH_KEY=' "$CONF/voice.env"; then
+  cat >> "$CONF/voice.env" <<'EOF'
+
+# Stimme: Microsoft Azure klingt natürlich. Leer = nur die Offline-Stimme (Piper, klingt künstlich).
+# portal.azure.com -> "Speech service" anlegen (Tarif "Free F0": 500.000 Zeichen/Monat kostenlos)
+# -> "Schlüssel und Endpunkt": Schlüssel 1 und Standort/Region (z.B. germanywestcentral) hier eintragen.
+AZURE_SPEECH_KEY=
+AZURE_SPEECH_REGION=germanywestcentral
+# Andere Stimmen z.B. de-DE-KatjaNeural, de-DE-FlorianMultilingualNeural, de-DE-SeraphinaMultilingualNeural
+AZURE_VOICE=de-DE-ConradNeural
+EOF
+fi
 chown root:bolzo-voice "$CONF/voice.env"
 chmod 640 "$CONF/voice.env"
 
@@ -135,6 +147,9 @@ info "Installiert."
 if grep -qE '^(SIP_USER|SIP_PASS|RMM_TOKEN|ANTHROPIC_API_KEY|PIN)=$' "$CONF/voice.env"; then
   info "Jetzt die Konfiguration ausfüllen:  nano $CONF/voice.env"
   info "Danach starten:                     systemctl restart bolzo-voice"
+fi
+if grep -qE '^AZURE_SPEECH_KEY=$' "$CONF/voice.env"; then
+  info "Für eine natürliche Stimme AZURE_SPEECH_KEY eintragen:  nano $CONF/voice.env"
 fi
 info "Logs: journalctl -u bolzo-voice -f"
 info "Test ohne Telefon: sudo -u bolzo-voice env \$(grep -v '^#' $CONF/voice.env | xargs) $APP/venv/bin/python $APP/bridge.py --test-text \"Welche Rechner sind offline?\""
