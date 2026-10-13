@@ -8,8 +8,10 @@ const cp = require('child_process');
 const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
+const tls = require('tls');
+const http = require('http');
 
-const VERSION = '1.6.1';
+const VERSION = '1.7.0';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -1019,7 +1021,7 @@ function openTunnel(sid, target) {
     };
     tunnels.set(sid, { close });
     setTimeout(() => { if (!tun || tun.readyState !== 1) { reject(new Error('Zeitüberschreitung beim Tunnelaufbau')); close(); } }, 15000);
-    sock.once('error', (e) => { reject(new Error(`VNC nicht erreichbar: ${e.message}`)); close(); });
+    sock.once('error', (e) => { reject(new Error(`${target.path ? 'VNC' : `${target.host}:${target.port}`} nicht erreichbar: ${e.message}`)); close(); });
     sock.on('close', close);
     sock.once('connect', () => {
       tun = new WebSocket(cfg.server.replace(/^http/, 'ws') + '/ws/tunnel');
@@ -1208,6 +1210,390 @@ async function fsUpload({ sid, dir, name }) {
 }
 
 // ---------------------------------------------------------------------------
+// Netzwerkgeräte (als Abfrage-Client): Ping, SNMP v1/v2c, OPNsense-API, Tunnel zur Weboberfläche.
+// Der Server schickt die Zugangsdaten mit jeder Anfrage mit – hier wird nichts davon gespeichert.
+// ---------------------------------------------------------------------------
+function checkHost(h) {
+  const s = String(h || '').trim();
+  if (!/^[a-zA-Z0-9.:_-]{1,253}$/.test(s) || s.startsWith('-')) throw new Error('Ungültige Geräte-Adresse');
+  return s;
+}
+
+// TCP-Verbindungsversuch: "open" (angenommen), "closed" (abgelehnt – das Gerät antwortet also) oder "timeout"
+function tcpProbe(host, port, timeout = 2500) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const s = net.connect({ host, port });
+    const done = (state) => { s.destroy(); resolve({ state, ms: Date.now() - t0 }); };
+    s.setTimeout(timeout, () => done('timeout'));
+    s.once('connect', () => done('open'));
+    s.once('error', (e) => done(e.code === 'ECONNREFUSED' ? 'closed' : 'timeout'));
+  });
+}
+
+async function netPing({ host, count = 1 }) {
+  host = checkHost(host);
+  const n = Math.min(Math.max(Number(count) || 1, 1), 5);
+  const args = IS_WIN ? ['-n', String(n), '-w', '2000', host] : ['-c', String(n), '-W', '2', host];
+  const r = await new Promise((resolve) => {
+    cp.execFile('ping', args, { timeout: 4000 + n * 2500, windowsHide: true }, (err, stdout) => resolve({ missing: err?.code === 'ENOENT', out: String(stdout || '') }));
+  });
+  if (!r.missing) {
+    // "time=1.23 ms" (Linux), "Zeit=1ms" / "Zeit<1ms" (Windows)
+    const times = [...r.out.matchAll(/(?:time|zeit)[=<]\s*([\d.,]+)\s*ms/gi)].map((m) => Number(m[1].replace(',', '.')));
+    if (times.length) return { alive: true, ms: Math.round((times.reduce((s, x) => s + x, 0) / times.length) * 10) / 10, via: 'ping' };
+  }
+  // Kein ping installiert (z.B. schlanke Container) oder ICMP gesperrt: über gängige TCP-Ports prüfen
+  const probes = await Promise.all([443, 80, 22].map((p) => tcpProbe(host, p)));
+  const hit = probes.find((p) => p.state !== 'timeout');
+  return { alive: !!hit, ms: hit ? hit.ms : null, via: hit ? 'tcp' : r.missing ? 'tcp' : 'ping' };
+}
+
+// ---- SNMP (BER-Kodierung, nur v1 und v2c) ----
+const BER = { INT: 0x02, OCTETS: 0x04, NULL: 0x05, OID: 0x06, SEQ: 0x30, IP: 0x40, COUNTER: 0x41, GAUGE: 0x42, TICKS: 0x43, OPAQUE: 0x44, COUNTER64: 0x46, NOSUCHOBJECT: 0x80, NOSUCHINSTANCE: 0x81, ENDOFMIB: 0x82 };
+const PDU = { get: 0xa0, next: 0xa1, set: 0xa3, bulk: 0xa5 };
+const SNMP_ERRORS = ['', 'tooBig', 'noSuchName', 'badValue', 'readOnly', 'genErr', 'noAccess', 'wrongType', 'wrongLength', 'wrongEncoding', 'wrongValue',
+  'noCreation', 'inconsistentValue', 'resourceUnavailable', 'commitFailed', 'undoFailed', 'authorizationError', 'notWritable', 'inconsistentName'];
+const SNMP_ERR_DE = {
+  noSuchName: 'Wert gibt es auf dem Gerät nicht', readOnly: 'nur lesbar', noAccess: 'kein Schreibzugriff (Schreib-Community prüfen)',
+  notWritable: 'nicht änderbar', authorizationError: 'nicht berechtigt', wrongValue: 'ungültiger Wert', badValue: 'ungültiger Wert',
+  wrongType: 'falscher Datentyp', genErr: 'allgemeiner Fehler des Geräts', resourceUnavailable: 'Gerät ausgelastet',
+};
+
+function berLen(n) {
+  if (n < 0x80) return Buffer.from([n]);
+  const bytes = [];
+  for (; n > 0; n = Math.floor(n / 256)) bytes.unshift(n & 0xff);
+  return Buffer.from([0x80 | bytes.length, ...bytes]);
+}
+const tlv = (tag, body) => Buffer.concat([Buffer.from([tag]), berLen(body.length), body]);
+// Ganzzahl als kürzestes Zweierkomplement (unsigned: ohne Vorzeichen, z.B. für Gauge32)
+function intBytes(v, unsigned = false) {
+  let n = BigInt(v);
+  const out = [];
+  for (;;) {
+    out.unshift(Number(BigInt.asUintN(8, n)));
+    n >>= 8n;
+    const top = out[0] & 0x80;
+    if (unsigned ? n === 0n && !top : (n === 0n && !top) || (n === -1n && top)) break;
+  }
+  return Buffer.from(out);
+}
+function oidBytes(oid) {
+  const p = String(oid).replace(/^\./, '').split('.').map(Number);
+  if (p.length < 2 || p.some((x) => !Number.isInteger(x) || x < 0)) throw new Error(`Ungültige OID: ${oid}`);
+  const out = [];
+  for (const x of [40 * p[0] + p[1], ...p.slice(2)]) {
+    const enc = [x & 0x7f];
+    for (let v = Math.floor(x / 128); v > 0; v = Math.floor(v / 128)) enc.unshift((v & 0x7f) | 0x80);
+    out.push(...enc);
+  }
+  return Buffer.from(out);
+}
+function berRead(buf, pos) {
+  if (pos + 2 > buf.length) throw new Error('SNMP-Antwort unvollständig');
+  const tag = buf[pos];
+  let len = buf[pos + 1];
+  let start = pos + 2;
+  if (len & 0x80) {
+    const n = len & 0x7f;
+    len = 0;
+    for (let i = 0; i < n; i++) len = len * 256 + buf[start + i];
+    start += n;
+  }
+  if (start + len > buf.length) throw new Error('SNMP-Antwort unvollständig');
+  return { tag, start, end: start + len };
+}
+function berItems(buf, outer) {
+  const items = [];
+  for (let p = outer.start; p < outer.end;) {
+    const t = berRead(buf, p);
+    items.push(t);
+    p = t.end;
+  }
+  return items;
+}
+function berUint(buf, t) {
+  let n = 0n;
+  for (let i = t.start; i < t.end; i++) n = (n << 8n) | BigInt(buf[i]);
+  return n;
+}
+function berInt(buf, t) {
+  const n = berUint(buf, t);
+  return t.end > t.start && buf[t.start] & 0x80 ? n - (1n << BigInt(8 * (t.end - t.start))) : n;
+}
+function berOid(buf, t) {
+  const parts = [];
+  let v = 0;
+  for (let i = t.start; i < t.end; i++) {
+    v = v * 128 + (buf[i] & 0x7f);
+    if (!(buf[i] & 0x80)) { parts.push(v); v = 0; }
+  }
+  const first = parts.shift() ?? 0;
+  const a = first < 80 ? Math.floor(first / 40) : 2;
+  return [a, first - 40 * a, ...parts].join('.');
+}
+// Werte kompakt für den Server: [Typ, Wert]; Zeichenketten als Hex (können Text oder Bytes sein, z.B. MAC-Adressen)
+function berValue(buf, t) {
+  switch (t.tag) {
+    case BER.INT: return ['int', Number(berInt(buf, t))];
+    case BER.OCTETS: case BER.OPAQUE: return ['hex', buf.subarray(t.start, t.end).toString('hex')];
+    case BER.NULL: return ['null', null];
+    case BER.OID: return ['oid', berOid(buf, t)];
+    case BER.IP: return ['ip', [...buf.subarray(t.start, t.end)].join('.')];
+    case BER.COUNTER: return ['counter', Number(berUint(buf, t))];
+    case BER.GAUGE: return ['gauge', Number(berUint(buf, t))];
+    case BER.TICKS: return ['ticks', Number(berUint(buf, t))];
+    case BER.COUNTER64: return ['counter64', Number(berUint(buf, t))];
+    case BER.NOSUCHOBJECT: case BER.NOSUCHINSTANCE: return ['none', null];
+    case BER.ENDOFMIB: return ['end', null];
+    default: return ['raw', buf.subarray(t.start, t.end).toString('hex')];
+  }
+}
+function berEncodeValue(vb) {
+  switch (vb.type) {
+    case undefined: case null: return tlv(BER.NULL, Buffer.alloc(0));
+    case 'int': return tlv(BER.INT, intBytes(vb.value));
+    case 'gauge': return tlv(BER.GAUGE, intBytes(vb.value, true));
+    case 'str': return tlv(BER.OCTETS, Buffer.from(String(vb.value), 'utf8'));
+    case 'hex': return tlv(BER.OCTETS, Buffer.from(String(vb.value), 'hex'));
+    default: throw new Error(`SNMP-Typ ${vb.type} wird nicht unterstützt`);
+  }
+}
+function snmpEncode({ version, community, pdu, reqId, a = 0, b = 0, varbinds }) {
+  const list = tlv(BER.SEQ, Buffer.concat(varbinds.map((vb) => tlv(BER.SEQ, Buffer.concat([tlv(BER.OID, oidBytes(vb.oid)), berEncodeValue(vb)])))));
+  const body = tlv(pdu, Buffer.concat([tlv(BER.INT, intBytes(reqId)), tlv(BER.INT, intBytes(a)), tlv(BER.INT, intBytes(b)), list]));
+  return tlv(BER.SEQ, Buffer.concat([tlv(BER.INT, intBytes(version)), tlv(BER.OCTETS, Buffer.from(String(community), 'utf8')), body]));
+}
+function snmpDecode(buf) {
+  const [, , pdu] = berItems(buf, berRead(buf, 0));
+  const [rid, status, index, list] = berItems(buf, pdu);
+  return {
+    reqId: Number(berInt(buf, rid)),
+    errorStatus: Number(berInt(buf, status)),
+    errorIndex: Number(berInt(buf, index)),
+    varbinds: berItems(buf, list).map((vb) => {
+      const [o, v] = berItems(buf, vb);
+      return [berOid(buf, o), ...berValue(buf, v)];
+    }),
+  };
+}
+const oidCmp = (x, y) => {
+  const a = x.split('.').map(Number), b = y.split('.').map(Number);
+  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
+};
+
+class SnmpSession {
+  constructor({ host, port = 161, version = '2c', community = 'public' }) {
+    this.host = checkHost(host);
+    this.port = intIn(port || 161, 1, 65535, 'SNMP-Port');
+    this.version = version === '1' ? 0 : 1;
+    this.community = String(community ?? '');
+    this.pending = new Map();
+    this.nextId = crypto.randomInt(1, 0x3fffffff);
+    this.sock = dgram.createSocket(net.isIPv6(this.host) ? 'udp6' : 'udp4');
+    this.sock.on('error', () => {});
+    this.sock.on('message', (buf) => {
+      let r;
+      try { r = snmpDecode(buf); } catch { return; }
+      const p = this.pending.get(r.reqId);
+      if (!p) return;
+      this.pending.delete(r.reqId);
+      clearTimeout(p.timer);
+      p.resolve(r);
+    });
+  }
+  close() {
+    for (const p of this.pending.values()) clearTimeout(p.timer);
+    this.pending.clear();
+    try { this.sock.close(); } catch {}
+  }
+  _send(pdu, varbinds, a, b, timeout) {
+    return new Promise((resolve, reject) => {
+      const reqId = (this.nextId = (this.nextId % 0x7ffffffe) + 1);
+      const msg = snmpEncode({ version: this.version, community: this.community, pdu, reqId, a, b, varbinds });
+      const timer = setTimeout(() => {
+        this.pending.delete(reqId);
+        reject(Object.assign(new Error('Keine Antwort per SNMP – Adresse, Community und SNMP-Freigabe am Gerät prüfen'), { timeout: true }));
+      }, timeout);
+      this.pending.set(reqId, { resolve, timer });
+      this.sock.send(msg, this.port, this.host, (err) => {
+        if (!err) return;
+        clearTimeout(timer);
+        this.pending.delete(reqId);
+        reject(err);
+      });
+    });
+  }
+  async request(pdu, varbinds, a = 0, b = 0) {
+    let r;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        r = await this._send(pdu, varbinds, a, b, 2500);
+        break;
+      } catch (e) {
+        if (!e.timeout || attempt >= 1) throw e;
+      }
+    }
+    if (r.errorStatus) {
+      const name = SNMP_ERRORS[r.errorStatus] || `Fehler ${r.errorStatus}`;
+      throw Object.assign(new Error(`SNMP: ${SNMP_ERR_DE[name] || name}`), { snmpError: name });
+    }
+    return r.varbinds;
+  }
+  get(oids) { return this.request(PDU.get, oids.map((oid) => ({ oid }))); }
+  set(varbinds) { return this.request(PDU.set, varbinds); }
+  // Teilbaum lesen (GETBULK bei v2c, sonst GETNEXT); liefert [Index relativ zur Basis, Typ, Wert]
+  async walk(base, max = 5000) {
+    base = String(base).replace(/^\./, '');
+    const prefix = `${base}.`;
+    const out = [];
+    let cur = base;
+    let reps = 25;
+    while (out.length < max) {
+      let vbs;
+      try {
+        vbs = this.version === 0 ? await this.request(PDU.next, [{ oid: cur }]) : await this.request(PDU.bulk, [{ oid: cur }], 0, reps);
+      } catch (e) {
+        if (e.snmpError === 'tooBig' && reps > 2) { reps = Math.floor(reps / 2); continue; }
+        if (e.snmpError === 'noSuchName' && this.version === 0) break; // v1 meldet so das Ende
+        throw e;
+      }
+      if (!vbs.length) break;
+      let done = false;
+      for (const [oid, type, value] of vbs) {
+        if (type === 'end' || type === 'none' || !oid.startsWith(prefix) || oidCmp(oid, cur) <= 0) { done = true; break; }
+        out.push([oid.slice(prefix.length), type, value]);
+        cur = oid;
+      }
+      if (done) break;
+    }
+    return out;
+  }
+}
+
+// Mehrere SNMP-Schritte nacheinander: get, walk, set, sleep (z.B. PoE aus – warten – an)
+async function netSnmp({ snmp, ops }) {
+  const s = new SnmpSession(snmp || {});
+  const results = [];
+  try {
+    for (const op of (Array.isArray(ops) ? ops : []).slice(0, 60)) {
+      try {
+        if (op.op === 'get') results.push({ ok: true, data: await s.get((op.oids || []).slice(0, 60)) });
+        else if (op.op === 'walk') results.push({ ok: true, data: await s.walk(op.oid, Math.min(Number(op.max) || 5000, 20000)) });
+        else if (op.op === 'set') results.push({ ok: true, data: await s.set((op.varbinds || []).slice(0, 20)) });
+        else if (op.op === 'sleep') { await sleep(Math.min(Number(op.ms) || 1000, 15000)); results.push({ ok: true }); }
+        else results.push({ ok: false, error: 'Unbekannte SNMP-Operation' });
+      } catch (e) {
+        results.push({ ok: false, error: e.message, timeout: !!e.timeout });
+        if (e.timeout) break; // Gerät antwortet nicht – die übrigen Schritte würden genauso warten
+      }
+    }
+  } finally {
+    s.close();
+  }
+  return { results };
+}
+
+// ---- HTTP(S) für Geräte-APIs (OPNsense) ----
+function tlsConnect({ host, port, timeout }) {
+  return new Promise((resolve, reject) => {
+    const s = tls.connect({ host, port, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: false, ALPNProtocols: ['http/1.1'] });
+    const t = setTimeout(() => { s.destroy(); reject(new Error('Zeitüberschreitung beim Verbinden')); }, timeout);
+    s.once('secureConnect', () => { clearTimeout(t); resolve(s); });
+    s.once('error', (e) => { clearTimeout(t); reject(new Error(e.code === 'ECONNREFUSED' ? 'Verbindung abgelehnt (Adresse/Port prüfen)' : e.message)); });
+  });
+}
+
+// Zertifikate: gültige (z.B. Let's Encrypt) werden normal geprüft. Selbst signierte – bei OPNsense
+// üblich – nur, wenn der Fingerabdruck zum gespeicherten passt. Ist noch keiner gespeichert, gilt der
+// erste (wie bei SSH); der Server merkt ihn sich. Erst nach dieser Prüfung gehen Zugangsdaten raus.
+async function httpRequest({ url, method = 'GET', headers = {}, body, pin, timeout = 15000, maxBytes = 8 * 1024 * 1024 }) {
+  const u = new URL(url);
+  if (!/^https?:$/.test(u.protocol)) throw new Error('Nur http und https werden unterstützt');
+  const host = checkHost(u.hostname.replace(/^\[|\]$/g, ''));
+  const port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
+  let socket = null;
+  let cert = null;
+  if (u.protocol === 'https:') {
+    socket = await tlsConnect({ host, port, timeout });
+    const pc = socket.getPeerCertificate() || {};
+    cert = { fingerprint: pc.fingerprint256 || '', subject: pc.subject?.CN || '', issuer: pc.issuer?.CN || pc.issuer?.O || '', validTo: pc.valid_to || '', trusted: socket.authorized };
+    if (!socket.authorized && pin && cert.fingerprint !== pin) {
+      socket.destroy();
+      throw Object.assign(new Error('Das Zertifikat des Geräts hat sich geändert. Falls das gewollt war (z.B. neu erstellt), in den Einstellungen des Geräts neu vertrauen.'), { code: 'CERT_CHANGED', cert });
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host, port, method, path: u.pathname + u.search, timeout,
+      headers: { Host: u.host, 'User-Agent': `BOLZO-RMM-Agent/${VERSION}`, ...headers, ...(body != null ? { 'Content-Length': Buffer.byteLength(body) } : {}) },
+      ...(socket ? { createConnection: () => socket } : {}),
+    });
+    req.on('response', (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > maxBytes) return req.destroy(new Error('Antwort zu groß'));
+        chunks.push(c);
+      });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks), cert }));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error('Zeitüberschreitung')));
+    req.on('error', (e) => { socket?.destroy(); reject(e); });
+    req.end(body);
+  });
+}
+
+// Mehrere OPNsense-API-Aufrufe (höchstens 4 gleichzeitig); jedes Ergebnis einzeln, damit ein
+// fehlendes Plugin (404) nicht die ganze Seite leer lässt
+async function netOpn({ opn, calls }) {
+  const base = String(opn?.url || '').replace(/\/+$/, '');
+  if (!/^https?:\/\/[^\s/?#]+$/.test(base)) throw new Error('Ungültige OPNsense-Adresse');
+  const auth = 'Basic ' + Buffer.from(`${opn.key || ''}:${opn.secret || ''}`).toString('base64');
+  const list = (Array.isArray(calls) ? calls : []).slice(0, 40);
+  const results = new Array(list.length);
+  let cert = null;
+  let pin = opn.pin || null;
+  const one = async (c) => {
+    const p = String(c.path || '');
+    if (!/^\/api\/[\w/.-]+(\?[\w=&%.,-]*)?$/.test(p)) throw new Error('Ungültiger API-Pfad');
+    const post = c.method === 'POST';
+    const body = post ? JSON.stringify(c.body ?? {}) : undefined;
+    const r = await httpRequest({
+      url: base + p, method: post ? 'POST' : 'GET', body, pin, timeout: Math.min(Number(c.timeout) || 15000, 120000),
+      headers: { Authorization: auth, Accept: 'application/json', ...(post ? { 'Content-Type': 'application/json' } : {}) },
+    });
+    cert = r.cert || cert;
+    if (c.raw) return { status: r.status, raw: r.body.toString('base64'), type: String(r.headers['content-type'] || '') };
+    const text = r.body.toString('utf8');
+    let data = null;
+    try { data = JSON.parse(text); } catch {}
+    return { status: r.status, data, ...(data == null ? { text: text.slice(0, 300) } : {}) };
+  };
+  const run = async (i) => {
+    try { results[i] = { ok: true, ...(await one(list[i])) }; } catch (e) { results[i] = { ok: false, error: e.message, code: e.code, ...(e.cert ? { cert: e.cert } : {}) }; }
+  };
+  // Erster Aufruf allein: er prüft das Zertifikat. Alle weiteren müssen dasselbe Zertifikat sehen.
+  if (list.length) await run(0);
+  if (results[0]?.code === 'CERT_CHANGED') return { results: results.fill(results[0]), cert: results[0].cert };
+  if (!pin && cert && !cert.trusted) pin = cert.fingerprint;
+  let next = 1;
+  const worker = async () => { while (next < list.length) await run(next++); };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return { results, cert };
+}
+
+async function netTunnel({ sid, host, port }) {
+  if (!/^[\w-]{8,64}$/.test(String(sid || ''))) throw new Error('Ungültige Sitzung');
+  await openTunnel(String(sid), { host: checkHost(host), port: intIn(port, 1, 65535, 'Port') });
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // Energie, Wake-on-LAN, Update, Deinstallation
 // ---------------------------------------------------------------------------
 function power(kind) {
@@ -1360,6 +1746,10 @@ const actions = {
   'pve.net.apply': pveNetApply,
   'vnc.open': vncOpen,
   'tunnel.close': ({ sid }) => { tunnels.get(sid)?.close(); return { ok: true }; },
+  'net.ping': netPing,
+  'net.snmp': netSnmp,
+  'net.opn': netOpn,
+  'net.tunnel': netTunnel,
 };
 
 async function handle(msg) {
