@@ -177,8 +177,9 @@ const validSession = (token) => (token ? sessionByKey(sha256hex(token)) : null);
 //   services  – Dienste anzeigen, starten, stoppen, neu starten
 //   proxmox   – VMs/Container eines Proxmox-Hosts anzeigen, starten, herunterfahren, neu starten
 //   scripts   – gespeicherte Skripte aus der Bibliothek ausführen (keine frei eingegebenen Befehle)
+//   jobs      – vorbereitete Jobs ausführen (Befehl und Rechner stehen fest, z.B. "Minecraft-Server starten")
 //   pvedelete – VMs/Container endgültig löschen (nur ausgeschaltet, Proxmox-Schutz wird beachtet)
-const TOKEN_SCOPES = ['status', 'power', 'processes', 'services', 'proxmox', 'scripts', 'pvedelete'];
+const TOKEN_SCOPES = ['status', 'power', 'processes', 'services', 'proxmox', 'scripts', 'jobs', 'pvedelete'];
 // Welches Recht eine Client-Aktion braucht (nicht aufgeführt = nur mit Admin-Anmeldung)
 const ACTION_SCOPES = { reboot: 'power', shutdown: 'power', processes: 'processes', kill: 'processes', services: 'services', service: 'services' };
 
@@ -404,6 +405,7 @@ app.delete('/api/agents/:id', requireAdmin, wrap(async (req, res) => {
   const c = conns.get(a.id);
   delete store.data.agents[a.id];
   live.delete(a.id);
+  for (const j of store.data.jobs) j.agentIds = j.agentIds.filter((id) => id !== a.id);
   store.save();
   auditAgent(req, a, 'client', 'Client entfernt');
   if (c) {
@@ -942,6 +944,7 @@ async function runOn(agentId, script, req) {
     hostname: a ? a.name || a.info?.hostname : agentId,
     scriptName: script.name || 'Ad-hoc',
     shell: script.shell,
+    ...(script.job ? { job: true } : {}),
   };
   try {
     if (!a) throw httpError(404, 'Client nicht gefunden');
@@ -955,7 +958,7 @@ async function runOn(agentId, script, req) {
   store.save();
   broadcast({ type: 'history' });
   const adhoc = script.name === 'Ad-hoc';
-  auditReq(req, 'script', adhoc ? 'Befehl ausgeführt' : 'Skript ausgeführt', {
+  auditReq(req, 'script', adhoc ? 'Befehl ausgeführt' : script.job ? 'Job ausgeführt' : 'Skript ausgeführt', {
     agentId, target: entry.hostname,
     detail: adhoc ? `${script.shell}: ${script.body.slice(0, 2000)}` : `${script.name} (${script.shell})`,
     ok: !entry.error && !entry.timedOut && entry.exitCode === 0,
@@ -981,6 +984,74 @@ app.post('/api/scripts/:sid/run', requireScope('scripts'), wrap(async (req, res)
   if (!ids.length) throw httpError(400, 'Keine Clients ausgewählt');
   log(`[run] ${s.name} -> ${ids.length} Client(s)`);
   res.json(await Promise.all(ids.map((id) => runOn(id, s, req))));
+}));
+
+// ---- Jobs -----------------------------------------------------------------
+// Vorbereitete Aufgaben: ein fester Befehl auf festen Rechnern, z.B. "Minecraft-Server starten" auf
+// SRV-MC. Mit dem Recht "jobs" auch per Telefon abrufbar – dort lässt sich weder der Befehl noch der
+// Rechner ändern, nur der ganze Job auslösen.
+function validateJob(body) {
+  const s = validateScript(body);
+  if (!s.body.trim()) throw httpError(400, 'Befehl fehlt');
+  const agentIds = [...new Set((Array.isArray(body.agentIds) ? body.agentIds : []).filter((id) => store.data.agents[id]))];
+  if (!agentIds.length) throw httpError(400, 'Mindestens einen Rechner auswählen');
+  return { ...s, agentIds, voice: body.voice !== false };
+}
+
+const jobOk = (r) => !r.error && !r.timedOut && r.exitCode === 0;
+// API-Zugänge sehen nur Jobs, die fürs Telefon freigegeben sind, und nicht den Befehl selbst
+const jobForToken = (j) => ({
+  id: j.id,
+  name: j.name,
+  description: j.description || '',
+  agents: j.agentIds.filter((id) => store.data.agents[id]).map((id) => ({ id, name: agentLabel(store.data.agents[id]), online: conns.has(id) })),
+});
+
+app.get('/api/jobs', requireScope('jobs'), (req, res) => res.json(req.apiToken
+  ? store.data.jobs.filter((j) => j.voice).map(jobForToken)
+  : store.data.jobs));
+
+app.post('/api/jobs', requireAdmin, wrap(async (req, res) => {
+  const j = { id: crypto.randomUUID(), ...validateJob(req.body || {}), createdAt: Date.now() };
+  store.data.jobs.push(j);
+  store.save();
+  auditReq(req, 'script', 'Job angelegt', { target: j.name });
+  broadcast({ type: 'jobs' });
+  res.json(j);
+}));
+
+app.put('/api/jobs/:jid', requireAdmin, wrap(async (req, res) => {
+  const j = store.data.jobs.find((x) => x.id === req.params.jid);
+  if (!j) throw httpError(404, 'Job nicht gefunden');
+  const oldName = j.name;
+  Object.assign(j, validateJob(req.body || {}), { updatedAt: Date.now() });
+  store.save();
+  auditReq(req, 'script', 'Job geändert', { target: j.name, detail: oldName !== j.name ? `umbenannt von ${oldName}` : undefined });
+  broadcast({ type: 'jobs' });
+  res.json(j);
+}));
+
+app.delete('/api/jobs/:jid', requireAdmin, (req, res) => {
+  const j = store.data.jobs.find((x) => x.id === req.params.jid);
+  if (j) auditReq(req, 'script', 'Job gelöscht', { target: j.name });
+  store.data.jobs = store.data.jobs.filter((x) => x.id !== req.params.jid);
+  store.save();
+  broadcast({ type: 'jobs' });
+  res.json({ ok: true });
+});
+
+// Job auf allen seinen Rechnern parallel ausführen – der Aufrufer bestimmt nichts außer dem Job
+app.post('/api/jobs/:jid/run', requireScope('jobs'), wrap(async (req, res) => {
+  const j = store.data.jobs.find((x) => x.id === req.params.jid);
+  if (!j || (req.apiToken && !j.voice)) throw httpError(404, 'Job nicht gefunden');
+  const ids = j.agentIds.filter((id) => store.data.agents[id]);
+  if (!ids.length) throw httpError(400, 'Der Job hat keine Rechner mehr');
+  log(`[job] ${j.name} -> ${ids.length} Client(s)`);
+  const results = await Promise.all(ids.map((id) => runOn(id, { ...j, job: true }, req)));
+  j.lastRun = { ts: Date.now(), ok: results.every(jobOk), by: actorOf(req) };
+  store.save();
+  broadcast({ type: 'jobs' });
+  res.json(results);
 }));
 
 app.get('/api/history', requireAdmin, (req, res) => {

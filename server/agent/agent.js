@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const dgram = require('dgram');
 const net = require('net');
 
-const VERSION = '1.6.1';
+const VERSION = '1.7.0';
 // Fingerabdruck des eigenen Codes – der Server erkennt daran veraltete Agents
 const CODE_HASH = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
 const IS_WIN = process.platform === 'win32';
@@ -327,7 +327,21 @@ async function serviceAction({ name, op }) {
 // Skripte ausführen
 // ---------------------------------------------------------------------------
 const MAX_OUTPUT = 512 * 1024;
-function runScript({ body, shell, timeout = 300 }) {
+// Skripte und Jobs laufen unter Linux in einem eigenen systemd-Scope (wie auf Proxmox-Hosts alles).
+// Was sie im Hintergrund starten – z.B. einen Minecraft-Server in tmux – hängt dann nicht am
+// Speicherlimit des Agents und wird bei dessen Neustart oder Update nicht mit beendet.
+let scriptScope = null;
+async function useScriptScope() {
+  if (scriptScope === null) {
+    scriptScope = SCOPE || (!IS_WIN && !TEST_PVE && fs.existsSync('/run/systemd/system')
+      && (await exec(SCOPE_PREFIX[0], [...SCOPE_PREFIX.slice(1), 'true'], { timeout: 10000 })).code === 0);
+    if (!IS_WIN) log(`Skripte laufen ${scriptScope ? 'in eigenem systemd-Scope' : 'im Agent-Dienst (kein systemd-Scope möglich)'}`);
+  }
+  return scriptScope;
+}
+
+async function runScript({ body, shell, timeout = 300 }) {
+  const scoped = await useScriptScope();
   return new Promise((resolve, reject) => {
     const ext = { powershell: '.ps1', cmd: '.cmd', bash: '.sh', sh: '.sh', python: '.py' }[shell];
     if (!ext) return reject(new Error('Unbekannte Shell'));
@@ -348,7 +362,7 @@ function runScript({ body, shell, timeout = 300 }) {
       sh: ['sh', [file]],
       python: [IS_WIN ? 'python' : 'python3', [file]],
     };
-    const [cmd, args] = outside(...cmds[shell]);
+    const [cmd, args] = scoped ? [SCOPE_PREFIX[0], [...SCOPE_PREFIX.slice(1), ...cmds[shell].flat()]] : cmds[shell];
     const start = Date.now();
     let output = '';
     let timedOut = false;

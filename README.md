@@ -21,6 +21,10 @@ Ports geöffnet werden, und sie funktionieren auch hinter NAT.
 - **Neustart / Herunterfahren / Wake-on-LAN** (WoL wird über einen anderen Client im selben Netz gesendet)
 - **Prozesse** anzeigen und beenden, **Dienste** starten/stoppen/neu starten (systemd bzw. Windows-Dienste)
 - **Skript-Bibliothek** (Bash, sh, PowerShell, CMD, Python) und Ausführung auf **mehreren Clients gleichzeitig**
+- **Jobs**: fester Befehl auf festen Rechnern, z.B. „Minecraft-Server starten“ auf SRV-MC – per Klick oder
+  per Telefon („Starte den Minecraft-Server“). Vorlagen für Programme in tmux (starten, sauber beenden, läuft es?).
+  Unter Linux startet der Agent Skripte und Jobs in einem eigenen systemd-Scope: Was sie im Hintergrund
+  starten, hängt nicht am Speicherlimit des Agents und läuft auch nach einem Agent-Update weiter.
 - **Protokoll (Audit-Log)** unter Verlauf: wer hat wann was getan – Anmeldungen (auch fehlgeschlagene),
   Neustart/Herunterfahren, Befehle und Skripte, Terminal-Sitzungen, Prozesse/Dienste, Einstellungen,
   API-Zugänge (z.B. Telefon), Updates, Online/Offline. Mit Filter, Suche und CSV-Export. Der Server hängt
@@ -157,7 +161,8 @@ braucht aber spürbar länger für die Antwort) meldet sich als IP-Telefon an, e
 Befehl verstehen und führt ihn über einen eingeschränkten API-Zugang aus. Jede Aktion wird vorher
 rückgefragt („Ja" sagen oder Taste 1). Was am Telefon geht, bestimmen die Rechte des API-Zugangs (in der App
 jederzeit änderbar, der Schlüssel bleibt gleich): Status, Neustart/Herunterfahren/Aufwecken, Prozesse beenden,
-Dienste steuern, Proxmox-VMs starten/stoppen, gespeicherte Skripte ausführen und – nur wenn angehakt –
+Dienste steuern, Proxmox-VMs starten/stoppen, gespeicherte Skripte und vorbereitete **Jobs** ausführen
+(„Starte den Minecraft-Server“ – Rechner und Befehl stehen im Job fest) und – nur wenn angehakt –
 ausgeschaltete VMs löschen (dafür zusätzlich die VM-Nummer auf der Tastatur eintippen). Terminal und frei
 diktierte Befehle gibt es am Telefon nie.
 

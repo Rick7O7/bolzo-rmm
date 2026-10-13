@@ -312,6 +312,13 @@ class Rmm:
     def run_script(self, script_id, client_ids):
         return self._check(self.http.post(f"/api/scripts/{script_id}/run", json={"agentIds": client_ids}, timeout=900))
 
+    def jobs(self):
+        return self._check(self.http.get("/api/jobs"))
+
+    def run_job(self, job_id, wait):
+        # Nach `wait` Sekunden nicht mehr warten – der Server führt den Job trotzdem zu Ende
+        return self._check(self.http.post(f"/api/jobs/{job_id}/run", timeout=httpx.Timeout(30, read=wait)))
+
 
 def client_summary(a):
     m = a.get("metrics") or {}
@@ -353,6 +360,7 @@ ABILITIES = {
     "proxmox": "VMs und Container auf den Proxmox-Servern anzeigen, starten, herunterfahren, neu starten und hart ausschalten",
     "pvedelete": "ausgeschaltete VMs und Container endgültig löschen",
     "scripts": "gespeicherte Skripte aus der Bibliothek auf Rechnern ausführen",
+    "jobs": "vorbereitete Jobs starten (z.B. einen Spieleserver starten) – jeder Job läuft immer auf seinen festen Rechnern",
 }
 
 SYSTEM = """Du bist der Telefon-Assistent von BOLZO RMM, einer Fernwartung für Server und PCs.
@@ -381,6 +389,13 @@ Nachfragen nur, wenn es passt: Musst du etwas wissen, endet die Antwort mit gena
 Hast du gerade eine Aktion ausgeführt, darfst du knapp anbieten weiterzumachen ("Sonst noch was?").
 Nach reinen Auskünften stellst du keine Frage – der Anrufer spricht von selbst weiter, wenn er mehr will.
 Niemals "Noch etwas?" oder ähnliche Floskeln nach jeder Antwort."""
+
+JOBS_HINT = """
+
+Vorbereitete Jobs stehen vor jedem Satz in <jobs> (Name, Beschreibung, Rechner). Passt ein Wunsch zu einem
+Job ("Starte den Minecraft-Server", "Minecraft an"), ruf run_job mit dessen id auf – auch wenn der Anrufer
+den Rechner nicht nennt, und statt selbst Dienste, Prozesse oder Skripte zu kombinieren. Passen mehrere
+Jobs, frag kurz nach, welcher gemeint ist."""
 
 
 def _tool(name, desc, props=None, required=None):
@@ -427,6 +442,11 @@ TOOLS = {
               "Bestätigung die VM-Nummer auf der Telefontastatur eintippen.",
               {"host_id": HOST_ID, "vmid": {"type": "integer"}}, ["host_id", "vmid"]),
     ],
+    "jobs": [
+        _tool("run_job", "Führt einen vorbereiteten Job aus <jobs> auf seinen festen Rechnern aus und liefert Exit-Code "
+              "und das Ende der Ausgabe je Rechner.",
+              {"job_id": {"type": "string", "description": "id aus <jobs>"}}, ["job_id"]),
+    ],
     "scripts": [
         _tool("list_scripts", "Die gespeicherten Skripte der Bibliothek mit id, Name und Beschreibung."),
         _tool("run_script", "Führt ein gespeichertes Skript auf einem oder mehreren Rechnern aus und liefert Exit-Code und das "
@@ -436,6 +456,7 @@ TOOLS = {
               ["script_id", "client_ids"]),
     ],
 }
+JOB_WAIT = 60  # so lange wartet der Anrufer höchstens auf das Ergebnis eines Jobs
 GUEST_OPS = {"start": ("starten", "wird gestartet"), "shutdown": ("herunterfahren", "wird heruntergefahren"),
              "reboot": ("neu starten", "wird neu gestartet"), "stop": ("hart ausschalten", "wurde ausgeschaltet")}
 SERVICE_OPS = {"start": ("starten", "wurde gestartet"), "stop": ("stoppen", "wurde gestoppt"), "restart": ("neu starten", "wurde neu gestartet")}
@@ -481,7 +502,7 @@ class Assistant:
         self.tools = [t for s in scopes for t in TOOLS[s]]
         if "pvedelete" in scopes and "proxmox" not in scopes:
             self.tools.append(TOOLS["proxmox"][0])  # zum Löschen muss er die Gäste finden können (nur Liste)
-        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in scopes))
+        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in scopes)) + (JOBS_HINT if "jobs" in scopes else "")
         log.info("Rechte am Telefon: %s", ", ".join(scopes))
 
     # --- Hilfen ---
@@ -665,6 +686,31 @@ class Assistant:
             return json.dumps([{"rechner": r.get("hostname"), "fehler": r.get("error"), "exit_code": r.get("exitCode"),
                                 "zeitüberschreitung": r.get("timedOut"), "ausgabe_ende": (r.get("output") or "")[-600:]} for r in res], ensure_ascii=False)
 
+        if name == "run_job":
+            j = next((x for x in self._do(self.rmm.jobs) if x["id"] == args.get("job_id")), None)
+            if not j:
+                raise ToolError("Diesen Job gibt es nicht (oder er ist am Telefon nicht freigegeben).")
+            agents = j.get("agents") or []
+            if not agents:
+                raise ToolError(f"Der Job {j['name']} hat keinen Rechner.")
+            names = ", ".join(a["name"] for a in agents)
+            if not any(a.get("online") for a in agents):
+                raise ToolError(f"Der Job {j['name']} kann nicht laufen: {names} ist offline.")
+            if not ui.confirm(f"Soll ich den Job {j['name']} auf {names} ausführen?"):
+                return no
+            ui.hint("Einen Moment.")
+            try:
+                res = self.rmm.run_job(j["id"], wait=JOB_WAIT)
+            except httpx.TimeoutException:
+                log.info("Ausgeführt: Job %s (läuft nach %d s noch)", j["name"], JOB_WAIT)
+                return f"Der Job {j['name']} läuft noch. Das Ergebnis steht später in der App unter Verlauf."
+            except Exception as e:
+                raise ToolError(f"Fehlgeschlagen: {e}") from e
+            log.info("Ausgeführt: Job %s auf %s", j["name"], names)
+            return json.dumps({"job": j["name"], "ergebnisse": [
+                {"rechner": r.get("hostname"), "fehler": r.get("error"), "exit_code": r.get("exitCode"),
+                 "zeitüberschreitung": r.get("timedOut"), "ausgabe_ende": (r.get("output") or "")[-600:]} for r in res]}, ensure_ascii=False)
+
         raise ToolError(f"Unbekanntes Werkzeug {name}.")
 
     @staticmethod
@@ -677,12 +723,20 @@ class Assistant:
     def ask(self, messages, text, ui):
         """Verarbeitet einen Satz des Anrufers. messages wird fortgeschrieben (nur anhängen).
         ui: confirm(frage) -> bool, confirm_code(frage, nummer) -> bool, hint(text)."""
+        ctx = ""
         try:
-            ctx = json.dumps([client_summary(a) for a in self.rmm.clients()], ensure_ascii=False)
-            messages.append({"role": "user", "content": f"<rechner>{ctx}</rechner>\n\n{text}"})
+            ctx += f"<rechner>{json.dumps([client_summary(a) for a in self.rmm.clients()], ensure_ascii=False)}</rechner>\n"
         except Exception as e:
             log.warning("Rechnerliste nicht abrufbar: %s", e)
-            messages.append({"role": "user", "content": text})
+        if "jobs" in self.scopes:
+            try:
+                jobs = [{"id": j["id"], "name": j["name"], "beschreibung": j.get("description") or "",
+                         "rechner": [f"{a['name']} ({'online' if a.get('online') else 'offline'})" for a in j.get("agents") or []]}
+                        for j in self.rmm.jobs()]
+                ctx += f"<jobs>{json.dumps(jobs, ensure_ascii=False)}</jobs>\n"
+            except Exception as e:
+                log.warning("Jobs nicht abrufbar: %s", e)
+        messages.append({"role": "user", "content": f"{ctx}\n{text}" if ctx else text})
         started = time.time()
         for rnd in range(1, 11):
             t0 = time.time()
@@ -983,7 +1037,7 @@ class CallSession:
                 # Nach einer Antwort ist eine Pause der passende Moment für "Sonst noch etwas?"
                 self.say("Sonst noch etwas?" if answered else "Ich habe nichts gehört. Was soll ich tun?")
                 continue
-            hint = "BOLZO RMM. Rechner: " + ", ".join(app.client_names())
+            hint = app.stt_hint()
             t0 = time.time()
             text = app.stt.transcribe(audio, hint)
             log.info("Erkannt (%.1f s Sprache, %.1f s Erkennung): %s", len(audio) / RATE, time.time() - t0, text)
@@ -1007,19 +1061,22 @@ class App:
         self.rmm = Rmm(cfg["rmm_url"], cfg["rmm_token"])
         self.assistant = Assistant(self.rmm, cfg["model"], cfg["effort"], self.rmm.scopes())
         self.lockout = Lockout(cfg["lockout_file"])
-        self._names, self._names_at = [], 0
+        self._hint, self._hint_at = "BOLZO RMM.", 0
         if with_phone:
             self.tts = make_tts(cfg)
             self.stt = Stt(cfg["whisper_model"], cfg["whisper_dir"])
 
-    def client_names(self):
-        if time.time() - self._names_at > 300:
+    def stt_hint(self):
+        """Namen der Rechner und Jobs als Hinweis für die Spracherkennung (z.B. "SRV-MC", "Minecraft")."""
+        if time.time() - self._hint_at > 300:
             try:
-                self._names = [a["name"] for a in self.rmm.clients()]
-                self._names_at = time.time()
+                hint = "BOLZO RMM. Rechner: " + ", ".join(a["name"] for a in self.rmm.clients()) + "."
+                if "jobs" in self.assistant.scopes:
+                    hint += " Jobs: " + ", ".join(j["name"] for j in self.rmm.jobs()) + "."
+                self._hint, self._hint_at = hint, time.time()
             except Exception:
                 pass
-        return self._names
+        return self._hint
 
     def on_call(self, call):
         number = caller_number(call)

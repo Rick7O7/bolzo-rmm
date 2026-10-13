@@ -72,6 +72,7 @@ class Store {
     data.apiTokens ??= []; // eingeschränkte Zugänge, z.B. für die Telefon-Sprachsteuerung
     data.folders ??= []; // Ordnerstruktur für Clients: { id, name, parentId }
     data.history ??= [];
+    data.jobs ??= []; // vorbereitete Aufgaben: fester Befehl auf festen Rechnern (auch per Telefon)
     data.settings ??= {};
     data.settings.thresholds ??= { cpu: 90, mem: 90, disk: 90 };
     data.settings.autoUpdateAgents ??= true;

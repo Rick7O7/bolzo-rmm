@@ -204,7 +204,7 @@ export function renderAuditLog(root, { agentId = null } = {}) {
 // ---------- Skript-Ausgaben ----------
 function renderRuns(root) {
   root.innerHTML = `
-    <div class="toolbar"><span class="muted" style="font-size:13px">Die letzten 300 Skript- und Befehlsausführungen mit vollständiger Ausgabe.</span>
+    <div class="toolbar"><span class="muted" style="font-size:13px">Die letzten 300 Skript-, Job- und Befehlsausführungen mit vollständiger Ausgabe.</span>
       <span class="spacer grow"></span>
       <button class="btn danger" data-clear>${icon('trash', 'sm')}Ausgaben löschen</button></div>
     <div class="card table-wrap"><table class="tbl"><thead><tr><th>Zeitpunkt</th><th>Client</th><th>Skript</th><th>Shell</th><th>Ergebnis</th></tr></thead><tbody></tbody></table></div>`;
@@ -215,7 +215,7 @@ function renderRuns(root) {
     $('tbody', root).innerHTML = items.length ? items.map((r, i) => `<tr class="click" data-i="${i}">
       <td class="num muted">${fmtTime(r.ts)}</td>
       <td style="font-weight:500">${esc(r.hostname)}</td>
-      <td>${esc(r.scriptName)}</td>
+      <td>${esc(r.scriptName)}${r.job ? ' <span class="badge accent" style="height:19px;font-size:11px">Job</span>' : ''}</td>
       <td class="muted">${esc(r.shell)}</td>
       <td>${exitBadge(r)}</td></tr>`).join('')
       : `<tr><td colspan="5"><div class="empty">${icon('clock')}<h3>Noch keine Ausgaben</h3><div>Hier erscheinen ausgeführte Skripte.</div></div></td></tr>`;

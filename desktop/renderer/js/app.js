@@ -4,6 +4,7 @@ import { renderDashboard } from './views/dashboard.js';
 import { renderClients } from './views/clients.js';
 import { renderClient } from './views/client.js';
 import { renderScripts } from './views/scripts.js';
+import { renderJobs } from './views/jobs.js';
 import { renderHistory } from './views/history.js';
 import { renderSettings } from './views/settings.js';
 import { renderPve } from './views/pve.js';
@@ -16,6 +17,7 @@ const NAV = [
   { href: '#/clients', label: 'Clients', icon: 'monitor' },
   { href: '#/proxmox', label: 'Proxmox', icon: 'server' },
   { href: '#/scripts', label: 'Skripte', icon: 'code' },
+  { href: '#/jobs', label: 'Jobs', icon: 'zap' },
   { href: '#/history', label: 'Verlauf', icon: 'clock' },
   { href: '#/settings', label: 'Einstellungen', icon: 'sliders', bottom: true }, // unten über der Verbindungsanzeige
 ];
@@ -26,6 +28,7 @@ const ROUTES = {
   clients: renderClients,
   client: renderClient,
   scripts: renderScripts,
+  jobs: renderJobs,
   history: renderHistory,
   proxmox: renderPve,
   guest: renderGuest,

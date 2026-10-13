@@ -9,6 +9,7 @@ const SCOPES = {
   services: { label: 'Dienste steuern', hint: 'Dienste anzeigen, starten, stoppen, neu starten' },
   proxmox: { label: 'Proxmox-Gäste steuern', hint: 'VMs und Container starten, herunterfahren, neu starten' },
   scripts: { label: 'Skripte ausführen', hint: 'Nur gespeicherte Skripte aus der Bibliothek – keine frei eingegebenen Befehle' },
+  jobs: { label: 'Jobs ausführen', hint: 'Nur vorbereitete Jobs mit festem Befehl und festen Rechnern, z.B. „Minecraft-Server starten“', def: true },
   pvedelete: { label: 'VMs/Container löschen', hint: 'Endgültig, nur ausgeschaltete Gäste. Am Telefon zusätzlich VM-Nummer eintippen' },
 };
 const scopeChecks = (on) => Object.entries(SCOPES).map(([k, s]) => `<label class="tk-scope" title="${esc(s.hint)}">
