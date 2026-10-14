@@ -490,13 +490,14 @@ function sendMagicPacket(macs) {
 }
 
 const subnet24 = (ip) => ip.split('.').slice(0, 3).join('.');
-app.post('/api/agents/:id/wake', requireScope('power'), wrap(async (req, res) => {
-  const a = getAgent(req);
+// Zugeordnete Proxmox-Gäste über Proxmox starten, sonst Wake-on-LAN über einen Client im selben Netz.
+// Gibt zurück, worüber geweckt wurde.
+async function wakeAgent(a, req) {
   if (a.pve && conns.has(a.pve.hostId)) {
     const host = store.data.agents[a.pve.hostId];
     await agentRequest(host.id, 'pve.power', { vmid: a.pve.vmid, type: a.pve.type, op: 'start' }, 30000);
     auditAgent(req, a, 'power', 'Aufwecken', { detail: `über Proxmox (${agentLabel(host)})` });
-    return res.json({ ok: true, via: `Proxmox (${agentLabel(host)})` });
+    return `Proxmox (${agentLabel(host)})`;
   }
   const ifaces = (a.info?.interfaces || []).filter((i) => i.mac && i.mac !== '00:00:00:00:00:00');
   if (!ifaces.length) throw httpError(400, 'Keine MAC-Adresse für diesen Client bekannt');
@@ -509,12 +510,16 @@ app.post('/api/agents/:id/wake', requireScope('power'), wrap(async (req, res) =>
     if (hit) {
       await agentRequest(id, 'wol', { macs });
       auditAgent(req, a, 'power', 'Aufwecken', { detail: `über ${agentLabel(other)}` });
-      return res.json({ ok: true, via: other.name || other.info.hostname });
+      return other.name || other.info.hostname;
     }
   }
   await sendMagicPacket(macs);
   auditAgent(req, a, 'power', 'Aufwecken', { detail: 'über den Server' });
-  res.json({ ok: true, via: 'Server' });
+  return 'Server';
+}
+
+app.post('/api/agents/:id/wake', requireScope('power'), wrap(async (req, res) => {
+  res.json({ ok: true, via: await wakeAgent(getAgent(req), req) });
 }));
 
 // ---- Proxmox ---------------------------------------------------------------
@@ -1009,7 +1014,18 @@ function validateJob(body) {
   if (!s.body.trim()) throw httpError(400, 'Befehl fehlt');
   const agentIds = [...new Set((Array.isArray(body.agentIds) ? body.agentIds : []).filter((id) => store.data.agents[id]))];
   if (!agentIds.length) throw httpError(400, 'Mindestens einen Rechner auswählen');
-  return { ...s, agentIds, voice: body.voice !== false };
+  return { ...s, agentIds, voice: body.voice !== false, wake: body.wake !== false };
+}
+
+// Ausgeschalteten Rechner eines Jobs starten und warten, bis sein Agent sich meldet
+const JOB_WAKE_WAIT = 240e3;
+async function wakeForJob(id, req) {
+  if (conns.has(id)) return;
+  await wakeAgent(store.data.agents[id], req);
+  const until = Date.now() + JOB_WAKE_WAIT;
+  while (!conns.has(id) && Date.now() < until) await new Promise((r) => setTimeout(r, 2000));
+  if (!conns.has(id)) throw httpError(504, `${agentLabel(store.data.agents[id])} wurde gestartet, ist aber nach ${JOB_WAKE_WAIT / 60e3} Minuten noch nicht online`);
+  await new Promise((r) => setTimeout(r, 3000)); // Agent nach dem Verbinden kurz ankommen lassen
 }
 
 const jobOk = (r) => !r.error && !r.timedOut && r.exitCode === 0;
@@ -1019,6 +1035,7 @@ const jobForToken = (j) => ({
   name: j.name,
   description: j.description || '',
   agents: j.agentIds.filter((id) => store.data.agents[id]).map((id) => ({ id, name: agentLabel(store.data.agents[id]), online: conns.has(id) })),
+  wake: j.wake !== false, // ausgeschaltete Rechner startet der Job selbst
 });
 
 app.get('/api/jobs', requireScope('jobs'), (req, res) => res.json(req.apiToken
@@ -1061,7 +1078,17 @@ app.post('/api/jobs/:jid/run', requireScope('jobs'), wrap(async (req, res) => {
   const ids = j.agentIds.filter((id) => store.data.agents[id]);
   if (!ids.length) throw httpError(400, 'Der Job hat keine Rechner mehr');
   log(`[job] ${j.name} -> ${ids.length} Client(s)`);
-  const results = await Promise.all(ids.map((id) => runOn(id, { ...j, job: true }, req)));
+  const results = await Promise.all(ids.map(async (id) => {
+    if (j.wake !== false && !conns.has(id)) {
+      try {
+        await wakeForJob(id, req);
+      } catch (e) { // Ergebnis wie bei einem fehlgeschlagenen Lauf, damit es im Verlauf steht
+        const a = store.data.agents[id];
+        return { ts: Date.now(), agentId: id, hostname: agentLabel(a), scriptName: j.name, shell: j.shell, job: true, error: `Starten fehlgeschlagen: ${e.message}` };
+      }
+    }
+    return runOn(id, { ...j, job: true }, req);
+  }));
   j.lastRun = { ts: Date.now(), ok: results.every(jobOk), by: actorOf(req) };
   store.save();
   broadcast({ type: 'jobs' });

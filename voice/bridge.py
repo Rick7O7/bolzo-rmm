@@ -480,10 +480,21 @@ Niemals "Noch etwas?" oder ähnliche Floskeln nach jeder Antwort."""
 
 JOBS_HINT = """
 
-Vorbereitete Jobs stehen vor jedem Satz in <jobs> (Name, Beschreibung, Rechner). Passt ein Wunsch zu einem
-Job ("Starte den Minecraft-Server", "Minecraft an"), ruf run_job mit dessen id auf – auch wenn der Anrufer
-den Rechner nicht nennt, und statt selbst Dienste, Prozesse oder Skripte zu kombinieren. Passen mehrere
-Jobs, frag kurz nach, welcher gemeint ist."""
+Jobs gehen vor: Vor jedem Satz stehen die vorbereiteten Jobs in <jobs> (Name, Beschreibung, Rechner). Passt
+ein Wunsch zu einem Job – "Starte den Minecraft-Server", "Minecraft an", "mach Minecraft an" –, ruf run_job
+mit dessen id auf. Das gilt auch, wenn ein Rechner, eine VM oder ein Tag ähnlich heißt: Rechner aufwecken,
+VMs oder Dienste starten nur, wenn der Anrufer ausdrücklich den Rechner bzw. die VM selbst meint oder kein Job
+passt. Ist der Rechner eines Jobs aus, startet run_job ihn selbst mit – weck ihn nicht vorher auf. Passen
+mehrere Jobs, frag kurz nach, welcher gemeint ist."""
+
+# Ohne das Recht "jobs" sieht Claude weder Werkzeug noch Liste – sonst deutet es "Starte den Minecraft-Server"
+# als "Rechner hochfahren"
+NO_JOBS_HINT = """
+
+Vorbereitete Jobs aus der App (z.B. "Minecraft-Server starten") kannst du am Telefon nicht ausführen: Dem
+API-Zugang fehlt das Recht "Jobs ausführen". Klingt ein Wunsch nach so einem Job oder fragt der Anrufer nach
+Jobs, sag ihm genau das (freischalten in der App unter Einstellungen, API-Zugänge) – weck dafür keinen Rechner
+auf und starte keine VM."""
 
 
 def _tool(name, desc, props=None, required=None):
@@ -498,7 +509,8 @@ TOOLS = {
                      "Datenträger-Auslastung, Laufzeit, Warnungen) – dieselben Angaben wie in <rechner>. Nur nötig, wenn sich "
                      "seitdem etwas geändert haben kann, z.B. ob ein Rechner nach dem Neustart wieder da ist.")],
     "power": [_tool("power_action", "Startet einen Rechner neu (reboot), fährt ihn herunter (shutdown) oder weckt einen "
-                    "ausgeschalteten Rechner per Wake-on-LAN (wake).",
+                    "ausgeschalteten Rechner per Wake-on-LAN (wake). Nur für den Rechner selbst – Programme oder Server aus "
+                    "<jobs> (z.B. Minecraft-Server) startet run_job, auch wenn der Rechner dafür aus ist.",
                     {"client_id": CLIENT_ID, "action": {"type": "string", "enum": ["reboot", "shutdown", "wake"]}}, ["client_id", "action"])],
     "processes": [
         _tool("list_processes", "Die Programme eines Rechners, die gerade am meisten CPU oder Arbeitsspeicher brauchen "
@@ -521,7 +533,7 @@ TOOLS = {
         _tool("list_guests", "Alle VMs und Container aller Proxmox-Server mit host_id, Server, vmid, Typ, Name, Status "
               "(running/stopped), CPU- und RAM-Auslastung."),
         _tool("guest_power", "Startet (start), fährt herunter (shutdown), startet neu (reboot) oder schaltet eine VM / einen "
-              "Container hart aus (stop – nur wenn er nicht mehr reagiert).",
+              "Container hart aus (stop – nur wenn er nicht mehr reagiert). Nicht für Jobs aus <jobs> – dafür run_job.",
               {"host_id": HOST_ID, "vmid": {"type": "integer"}, "op": {"type": "string", "enum": ["start", "shutdown", "reboot", "stop"]}},
               ["host_id", "vmid", "op"]),
     ],
@@ -532,7 +544,8 @@ TOOLS = {
     ],
     "jobs": [
         _tool("run_job", "Führt einen vorbereiteten Job aus <jobs> auf seinen festen Rechnern aus und liefert Exit-Code "
-              "und das Ende der Ausgabe je Rechner.",
+              "und das Ende der Ausgabe je Rechner. Ist ein Rechner des Jobs aus, startet der Job ihn vorher selbst "
+              "(Rückfrage beim Anrufer inklusive) – also direkt aufrufen, nicht erst aufwecken.",
               {"job_id": {"type": "string", "description": "id aus <jobs>"}}, ["job_id"]),
     ],
     "scripts": [
@@ -545,6 +558,7 @@ TOOLS = {
     ],
 }
 JOB_WAIT = 60  # so lange wartet der Anrufer höchstens auf das Ergebnis eines Jobs
+JOB_WAKE_WAIT = 25  # muss der Rechner erst starten, nicht so lange schweigen – der Job läuft danach von selbst
 GUEST_OPS = {"start": ("starten", "wird gestartet"), "shutdown": ("herunterfahren", "wird heruntergefahren"),
              "reboot": ("neu starten", "wird neu gestartet"), "stop": ("hart ausschalten", "wurde ausgeschaltet")}
 SERVICE_OPS = {"start": ("starten", "wurde gestartet"), "stop": ("stoppen", "wurde gestoppt"), "restart": ("neu starten", "wurde neu gestartet")}
@@ -590,8 +604,10 @@ class Assistant:
         self.tools = [t for s in scopes for t in TOOLS[s]]
         if "pvedelete" in scopes and "proxmox" not in scopes:
             self.tools.append(TOOLS["proxmox"][0])  # zum Löschen muss er die Gäste finden können (nur Liste)
-        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in scopes)) + (JOBS_HINT if "jobs" in scopes else "")
+        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in scopes)) + (JOBS_HINT if "jobs" in scopes else NO_JOBS_HINT)
         log.info("Rechte am Telefon: %s", ", ".join(scopes))
+        if "jobs" not in scopes:
+            log.warning("Jobs am Telefon nicht verfügbar: dem API-Zugang fehlt das Recht 'Jobs ausführen' (App: Einstellungen -> API-Zugänge)")
 
     # --- Hilfen ---
     def _client(self, client_id, need_online=True):
@@ -782,15 +798,24 @@ class Assistant:
             if not agents:
                 raise ToolError(f"Der Job {j['name']} hat keinen Rechner.")
             names = ", ".join(a["name"] for a in agents)
-            if not any(a.get("online") for a in agents):
-                raise ToolError(f"Der Job {j['name']} kann nicht laufen: {names} ist offline.")
-            if not ui.confirm(f"Soll ich den Job {j['name']} auf {names} ausführen?"):
+            off = [a["name"] for a in agents if not a.get("online")]
+            wake = bool(off) and bool(j.get("wake"))  # der Server startet ausgeschaltete Rechner des Jobs selbst
+            if off and len(off) == len(agents) and not wake:
+                raise ToolError(f"Der Job {j['name']} kann nicht laufen: {names} ist offline, und der Job startet ihn "
+                                "nicht selbst. Biete an, den Rechner aufzuwecken, falls du das darfst.")
+            question = (f"{', '.join(off)} ist aus. Soll ich {'ihn' if len(off) == 1 else 'sie'} starten und danach den Job "
+                        f"{j['name']} ausführen?" if wake else f"Soll ich den Job {j['name']} auf {names} ausführen?")
+            if not ui.confirm(question):
                 return no
             ui.hint("Einen Moment.")
+            wait = JOB_WAKE_WAIT if wake else JOB_WAIT
             try:
-                res = self.rmm.run_job(j["id"], wait=JOB_WAIT)
+                res = self.rmm.run_job(j["id"], wait=wait)
             except httpx.TimeoutException:
-                log.info("Ausgeführt: Job %s (läuft nach %d s noch)", j["name"], JOB_WAIT)
+                log.info("Ausgeführt: Job %s (läuft nach %d s noch%s)", j["name"], wait, ", Rechner startet" if wake else "")
+                if wake:
+                    return (f"{', '.join(off)} wird gestartet, danach läuft der Job {j['name']} von selbst. Das kann ein, zwei "
+                            "Minuten dauern – das Ergebnis steht dann in der App unter Verlauf.")
                 return f"Der Job {j['name']} läuft noch. Das Ergebnis steht später in der App unter Verlauf."
             except Exception as e:
                 raise ToolError(f"Fehlgeschlagen: {e}") from e

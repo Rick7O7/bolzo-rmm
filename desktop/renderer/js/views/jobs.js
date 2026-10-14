@@ -81,13 +81,37 @@ export function renderJobs(root) {
       <span class="spacer"></span>
       <button class="btn primary" data-new>${icon('plus')}Neuer Job</button>
     </div>
+    <div data-scopewarn></div>
     <div class="scripts-layout">
       <div class="card script-list" data-list></div>
       <div data-editor></div>
     </div>`;
 
+  // Ohne das Recht „Jobs ausführen“ kennt die Sprachsteuerung keine Jobs und deutet „Starte den
+  // Minecraft-Server“ als „Rechner hochfahren“ – deshalb hier deutlich darauf hinweisen
+  async function checkScopes() {
+    const box = $('[data-scopewarn]', root);
+    let tokens = [];
+    try { tokens = await api.get('/api/tokens'); } catch { return; }
+    const missing = jobs.some((j) => j.voice) && tokens.length && !tokens.some((t) => t.scopes.includes('jobs'));
+    box.innerHTML = missing ? `<div class="card card-pad row" style="margin-bottom:14px;flex-wrap:wrap;gap:10px;border-color:color-mix(in srgb, var(--warning) 50%, transparent)">
+        <span style="color:var(--warning)">${icon('alert', 'sm')}</span>
+        <span class="grow">Am Telefon kennt die Sprachsteuerung noch keine Jobs: Kein API-Zugang hat das Recht <b>„Jobs ausführen“</b>.</span>
+        ${tokens.map((t) => `<button class="btn sm" data-grant="${t.id}">${icon('key', 'sm')}Für „${esc(t.name)}“ freischalten</button>`).join('')}
+      </div>` : '';
+    $$('[data-grant]', box).forEach((b) => (b.onclick = async () => {
+      const t = tokens.find((x) => x.id === b.dataset.grant);
+      try {
+        await api.patch(`/api/tokens/${t.id}`, { scopes: [...t.scopes, 'jobs'] });
+        toast(`„${t.name}“ darf jetzt Jobs ausführen – gilt ab dem nächsten Anruf`);
+        checkScopes();
+      } catch (e) { toast(e.message, 'err'); }
+    }));
+  }
+
   async function load(selectId) {
     jobs = await api.get('/api/jobs');
+    checkScopes();
     drawList();
     if (current && !current.id) return; // neuer, noch nicht gespeicherter Job bleibt offen
     const j = jobs.find((x) => x.id === (selectId ?? current?.id)) || jobs[0];
@@ -133,8 +157,12 @@ export function renderJobs(root) {
           </div>
           <div class="field"><label>Beschreibung</label><input class="input" data-f="description" value="${esc(j.description || '')}" placeholder="Hilft am Telefon beim Erkennen, z.B. „Startet den Minecraft-Server in tmux“"></div>
           <div class="field"><label>Rechner</label><div class="pick-list" data-pick style="max-height:220px"></div></div>
-          <label class="tk-scope" style="max-width:520px"><input type="checkbox" class="check" data-f="voice" ${j.voice !== false ? 'checked' : ''}>
-            <span><b>Per Telefon abrufbar</b><small>„Starte den Minecraft-Server“ – braucht im API-Zugang das Recht „Jobs ausführen“. Jede Ausführung wird am Telefon rückgefragt.</small></span></label>
+          <div class="tk-scopes">
+            <label class="tk-scope"><input type="checkbox" class="check" data-f="voice" ${j.voice !== false ? 'checked' : ''}>
+              <span><b>Per Telefon abrufbar</b><small>„Starte den Minecraft-Server“ – braucht im API-Zugang das Recht „Jobs ausführen“. Jede Ausführung wird am Telefon rückgefragt.</small></span></label>
+            <label class="tk-scope"><input type="checkbox" class="check" data-f="wake" ${j.wake !== false ? 'checked' : ''}>
+              <span><b>Ausgeschaltete Rechner vorher starten</b><small>Über Proxmox (zugeordnete VM) bzw. Wake-on-LAN, dann wartet der Job bis zu 4 Minuten, bis der Rechner online ist.</small></span></label>
+          </div>
           <div class="field">
             <label class="row" style="justify-content:space-between"><span>Befehl</span>
               <select class="select" data-template style="width:auto;height:28px;font-size:12.5px"><option value="">Vorlage einfügen …</option>
