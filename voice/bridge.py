@@ -361,12 +361,13 @@ class Rmm:
         return r.json()
 
     def scopes(self):
-        """Rechte dieses API-Zugangs (ältere Server kennen die Abfrage nicht: dann Status + Neustart)."""
+        """(Name, Rechte) dieses API-Zugangs – None, wenn die Abfrage fehlschlägt (z.B. Server startet neu)."""
         try:
-            return self._check(self.http.get("/api/token-info"))["scopes"]
+            info = self._check(self.http.get("/api/token-info"))
+            return info.get("name") or "", info["scopes"]
         except Exception as e:
-            log.warning("Rechte des API-Zugangs unbekannt (%s) – nehme Status und Neustart an", e)
-            return ["status", "power"]
+            log.warning("Rechte des API-Zugangs nicht abfragbar (%s)", e)
+            return None
 
     def clients(self, max_age=3):
         if time.time() - self._clients_at > max_age:
@@ -492,9 +493,9 @@ mehrere Jobs, frag kurz nach, welcher gemeint ist."""
 NO_JOBS_HINT = """
 
 Vorbereitete Jobs aus der App (z.B. "Minecraft-Server starten") kannst du am Telefon nicht ausführen: Dem
-API-Zugang fehlt das Recht "Jobs ausführen". Klingt ein Wunsch nach so einem Job oder fragt der Anrufer nach
-Jobs, sag ihm genau das (freischalten in der App unter Einstellungen, API-Zugänge) – weck dafür keinen Rechner
-auf und starte keine VM."""
+API-Zugang {zugang}fehlt das Recht "Jobs ausführen". Klingt ein Wunsch nach so einem Job oder fragt der Anrufer
+nach Jobs, sag ihm genau das und nenn dabei den Namen des Zugangs (freischalten in der App unter Einstellungen,
+API-Zugänge) – weck dafür keinen Rechner auf und starte keine VM."""
 
 
 def _tool(name, desc, props=None, required=None):
@@ -584,30 +585,41 @@ def top_programs(procs, n=20):
 
 
 class Assistant:
-    def __init__(self, rmm, model, effort, scopes=None):
+    def __init__(self, rmm, model, effort, access=None):
         self.rmm = rmm
         self.model = model
         self.effort = effort
         self.client = anthropic.Anthropic()
         self._guest_cache, self._guest_at = [], 0.0
-        self.scopes = None
-        self.set_scopes(scopes)
+        self.scopes, self.token_name = None, None
+        self.set_scopes(access)
 
-    def set_scopes(self, scopes):
-        """Werkzeuge und Prompt passend zu den Rechten des API-Zugangs (bei jedem Anruf neu abgefragt)."""
-        scopes = [s for s in (scopes or ["status", "power"]) if s in TOOLS]
+    def set_scopes(self, access):
+        """Werkzeuge und Prompt passend zu den Rechten des API-Zugangs (bei jedem Anruf neu abgefragt).
+        access: (Name, Rechte) aus Rmm.scopes() oder None, wenn die Abfrage fehlgeschlagen ist."""
+        if access is None:
+            if self.scopes is not None:  # z.B. Server startet gerade neu: bisherige Rechte behalten
+                log.warning("Rechte nicht abfragbar – behalte die bisherigen: %s", ", ".join(self.scopes))
+                return
+            access = (None, ["status", "power"])  # ältere Server kennen die Abfrage nicht
+        name, scopes = access
+        scopes = [s for s in scopes if s in TOOLS]
         if "status" not in scopes:
             scopes.insert(0, "status")  # Rechner finden geht immer (Server prüft trotzdem)
-        if scopes == self.scopes:
+        if scopes == self.scopes and name == self.token_name:
             return
-        self.scopes = scopes
+        self.scopes, self.token_name = scopes, name
         self.tools = [t for s in scopes for t in TOOLS[s]]
         if "pvedelete" in scopes and "proxmox" not in scopes:
             self.tools.append(TOOLS["proxmox"][0])  # zum Löschen muss er die Gäste finden können (nur Liste)
-        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in scopes)) + (JOBS_HINT if "jobs" in scopes else NO_JOBS_HINT)
-        log.info("Rechte am Telefon: %s", ", ".join(scopes))
+        label = f"„{name}“" if name else ""
+        self.system = SYSTEM.replace("{abilities}", "; ".join(ABILITIES[s] for s in scopes)) + (
+            JOBS_HINT if "jobs" in scopes else NO_JOBS_HINT.replace("{zugang}", f"{label} " if label else ""))
+        # Der Name zeigt, welcher Zugang aus der App (Einstellungen -> API-Zugänge) zu RMM_TOKEN gehört
+        log.info("API-Zugang %s – Rechte am Telefon: %s", label or "(Name unbekannt)", ", ".join(scopes))
         if "jobs" not in scopes:
-            log.warning("Jobs am Telefon nicht verfügbar: dem API-Zugang fehlt das Recht 'Jobs ausführen' (App: Einstellungen -> API-Zugänge)")
+            log.warning("Jobs am Telefon nicht verfügbar: dem API-Zugang %s fehlt das Recht 'Jobs ausführen' "
+                        "(App: Einstellungen -> API-Zugänge)", label or "(Name unbekannt)")
 
     # --- Hilfen ---
     def _client(self, client_id, need_online=True):
